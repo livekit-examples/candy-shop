@@ -5,12 +5,12 @@
 # `OperatorConfig.from_yaml_file(...)`. Identity (session, role) is supplied
 # at the call site so the same file is reusable across all processes.
 #
-# Hardware = leslider: an SO-101 arm mounted on a linear slider. All seven
-# motors are position-controlled: the six arm motors plus the slider, whose
-# STS3215 runs in extended (multi-turn) position mode. Every joint, slider
-# included, is a normalized `.pos`. The slider's position is reported and
-# commanded as `slider.pos` in 0..100 (0 = home/full-retract, 100 = the
-# calibrated upper limit).
+# Hardware = leslider: an SO-101 arm mounted on a linear slider. The six arm
+# motors are position-controlled normalized `.pos`; the slider's STS3215 runs
+# in VELOCITY mode. The slider is reported and commanded as `slider.vel` in
+# raw ticks/s (sign-magnitude; +/- for the two travel directions, 0 = stop).
+# There is no absolute slider position on the wire — placement is closed-loop
+# from vision (see operators/move_to: an overhead ArUco marker + PID).
 #
 # State and action are intentionally lean (7 fields, no motor currents).
 # Add `*.current` fields to both schemas if you want them, robot.py
@@ -49,7 +49,7 @@ videos:
   - { name: arm_camera,      codec: h264 }
   - { name: overhead_camera, codec: h264 }
 
-# 6 arm motor positions + 1 slider position (uniform .pos).
+# 6 arm motor positions + slider velocity (raw ticks/s).
 state:
   - { name: shoulder_pan.pos,  dtype: f32 }
   - { name: shoulder_lift.pos, dtype: f32 }
@@ -57,10 +57,11 @@ state:
   - { name: wrist_flex.pos,    dtype: f32 }
   - { name: wrist_roll.pos,    dtype: f32 }
   - { name: gripper.pos,       dtype: f32 }
-  - { name: slider.pos,        dtype: f32 }
+  - { name: slider.vel,        dtype: f32 }
 
-# Action mirrors state. Both human teleop (SO-101 leader + arrow-key
-# slider position target) and any lerobot policy emit one of these per tick.
+# Action mirrors state: 6 arm `.pos` goals + a slider velocity command.
+# The move_to operator holds the arm (mirroring observed `.pos`) and drives
+# `slider.vel` from its PID; a lerobot policy emits the same shape per tick.
 action:
   - { name: shoulder_pan.pos,  dtype: f32 }
   - { name: shoulder_lift.pos, dtype: f32 }
@@ -68,4 +69,4 @@ action:
   - { name: wrist_flex.pos,    dtype: f32 }
   - { name: wrist_roll.pos,    dtype: f32 }
   - { name: gripper.pos,       dtype: f32 }
-  - { name: slider.pos,        dtype: f32 }
+  - { name: slider.vel,        dtype: f32 }

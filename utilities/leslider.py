@@ -1,12 +1,11 @@
 """Hardware builders and observation shaping for the leslider rig.
 
 Concentrates everything that's about *the hardware* — cameras and the SO-101
-follower and leader — so `robot/run.py` and the teleoperator can stay focused
-on the Portal-side flow.
+follower — so `robot/run.py` can stay focused on the Portal-side flow.
 
-The leslider is an SO-101 arm on a linear slider. The slider runs in extended
-(multi-turn) position mode, so every joint is a normalized `.pos` and the
-slider reports/commands a unified `slider.pos` in 0..100.
+The leslider is an SO-101 arm on a linear slider. The six arm motors are
+normalized `.pos`; the slider's STS3215 runs in VELOCITY mode, reporting and
+accepting a raw ticks/s `slider.vel` (sign-magnitude; 0 = stop).
 """
 from __future__ import annotations
 
@@ -15,21 +14,17 @@ import platform
 import numpy as np
 from lerobot.cameras import Cv2Backends, Cv2Rotation
 from lerobot.cameras.opencv import OpenCVCameraConfig
-from lerobot_robot_so101_slider_pos import (
-    SO101SliderPosFollower,
-    SO101SliderPosFollowerConfig,
-)
-from lerobot_teleoperator_so101_with_slider_pos import (
-    SO101WithSliderPosLeader,
-    SO101WithSliderPosLeaderConfig,
+from lerobot_robot_so101_slider import (
+    SO101SliderFollower,
+    SO101SliderFollowerConfig,
 )
 
-from utilities.common import env_bool, env_camera_id, env_int, env_str
+from utilities.common import env_camera_id, env_int, env_str
 
 CAMERAS: tuple[str, ...] = ("arm_camera", "overhead_camera")
 
 
-def build_follower(fps: int) -> SO101SliderPosFollower:
+def build_follower(fps: int) -> SO101SliderFollower:
     """Construct the SO-101 slider follower from environment variables.
     """
     width = env_int("LESLIDER_CAM_WIDTH", 640)
@@ -51,24 +46,14 @@ def build_follower(fps: int) -> SO101SliderPosFollower:
         )
         for name, (env_var, default) in cam_defaults.items()
     }
-    return SO101SliderPosFollower(
-        SO101SliderPosFollowerConfig(
+    return SO101SliderFollower(
+        SO101SliderFollowerConfig(
             id=env_str("LESLIDER_ID", "leslider"),
             port=env_str("LESLIDER_PORT", "/dev/ttyACM0"),
             cameras=cameras,
-            slider_goal_speed=env_int("LESLIDER_SLIDER_GOAL_SPEED", 2000),
+            slider_id=env_int("LESLIDER_SLIDER_ID", 7),
+            slider_max_velocity=env_int("LESLIDER_SLIDER_MAX_VELOCITY", 3000),
             read_current=False,
-        )
-    )
-
-
-def build_leader(port: str | None = None) -> SO101WithSliderPosLeader:
-    """Construct the SO-101 leader arm + slider (teleoperation input)."""
-    return SO101WithSliderPosLeader(
-        SO101WithSliderPosLeaderConfig(
-            id=env_str("SO101_LEADER_ID", "so101_leader"),
-            port=port or env_str("SO101_LEADER_PORT", "/dev/ttyACM0"),
-            invert_direction=env_bool("LESLIDER_INVERT_SLIDER", default=False),
         )
     )
 

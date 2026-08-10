@@ -1,7 +1,7 @@
 """Portal robot process for the physical leslider follower (the candy shop rig).
 
-Publishes both cameras + the 7 `.pos` state fields each tick and applies the
-active operator's action.
+Publishes both cameras + the state each tick (6 arm `.pos` + `slider.vel`) and
+applies the active operator's action. The slider runs in velocity mode.
 """
 from __future__ import annotations
 
@@ -58,8 +58,9 @@ async def main() -> None:
             asyncio.create_task(robot.set_active_operator(None))
 
     async def reset_to_zero_position(data: RpcInvocationData) -> str:
-        """Command the parked rest pose (arm + slider). Claims active operator so
-        no live stream overrides it; the follower ramps to the pose internally."""
+        """Command the parked rest pose: fold the arm to its safe pose and stop
+        the slider (`slider.vel = 0`). Claims active operator so no live stream
+        overrides it. Doubles as the preempt-anything cancel path."""
         nonlocal latest_action
         logger.info("[robot] reset_to_zero_position from '%s'", data.caller_identity)
         await robot.set_active_operator(robot.local_identity())
