@@ -7,9 +7,7 @@ dependencies = [
     "livekit-portal>=0.2.4",
     "livekit-api>=0.7",
     "livekit>=1.1.8",
-    # molmoact2 extra pulls transformers+peft for the policy operator; >=0.6.1
-    # is the first lerobot that ships lerobot.policies.molmoact2.
-    "lerobot[feetech,molmoact2]==0.6.1",
+    "lerobot[feetech,molmoact2,dataset]==0.6.1",
     "lerobot_robot_so101_slider",
     "torch>=2.2",
     "torchvision",
