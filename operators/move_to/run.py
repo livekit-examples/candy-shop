@@ -1,25 +1,8 @@
-"""Operator side: the candy shop's positioner (visual-servo, velocity mode).
-
-Joins the leslider room as an Operator peer and serves one RPC:
-
-``move_to(pos)``
-  ``pos`` is 0..100 — bottom to top of the calibrated safe zone in the overhead
-  image. The operator detects the robot's on-board ArUco marker and runs a PID
-  loop that commands ``slider.vel`` until the marker sits on the target line
-  (then stops). **This is the whole order path.** The candy shop works from two
-  fixed stations, so the agent drives to two numbers (``POSITIONS`` in the
-  agent's config); which candy gets picked is decided by the policy operator.
-
-Parking the rig is deliberately *not* here: the robot owns
-``reset_to_zero_position`` (see ``robot/run.py``), which the agent calls
-directly and which doubles as the preempt-anything cancel.
-
-Tuning (PID gains, marker id, deadzone, ...) lives in ``config.py``. Only
-``LIVEKIT_*`` and ``LIVEKIT_ROOM`` come from the environment.
+"""Positioner operator: serves the ``move_to(pos)`` RPC (visual servo, velocity mode).
 
 Usage::
 
-    uv run python operators/move_to/calibrate.py  # once, click the two bound lines
+    uv run move-to-calibrate  # once, click the two bound lines
     uv run move-to
 """
 from __future__ import annotations
@@ -88,7 +71,6 @@ async def main() -> None:
     servo = SliderServo(op, fps=cfg.fps, safe_zone=safe_zone, detector=detector)
 
     async def move_to(data: RpcInvocationData) -> str:
-        """Servo the marker to ``pos`` (0..100, bottom..top of the safe zone)."""
         logger.info("[move-to] move_to RPC from '%s'", data.caller_identity)
         requested = _payload_number(data)
         servo.require_state()

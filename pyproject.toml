@@ -23,6 +23,8 @@ dependencies = [
 [project.scripts]
 robot = "robot.run:cli"
 move-to = "operators.move_to.run:cli"
+move-to-calibrate = "operators.move_to.calibrate:main"
+move-to-debug = "operators.move_to.debug_move_to:cli"
 policy = "operators.policy.run:cli"
 policy-train = "operators.policy.train:cli"
 reward = "operators.reward.run:cli"

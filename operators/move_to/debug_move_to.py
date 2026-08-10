@@ -1,15 +1,5 @@
-"""Standalone debug driver for the visual servo (click a target, tune the PID).
-
-Joins the leslider room as its OWN operator ("move-to-debug") and drives the
-slider directly, reusing ``SliderServo`` so you can tune the PID by eye. It does
-NOT call move-to-operator's RPCs.
-
-A live OpenCV window shows the overhead camera with the safe-zone overlay:
-
-  * orange line   pos 0 bound (bottom)
-  * green line    pos 100 bound (top)
-  * blue line     the current target
-  * cyan box      the detected ArUco marker
+"""Standalone debug driver for the visual servo: drive the slider directly and
+tune the PID by eye. Its own operator ("move-to-debug"); does NOT call the RPC.
 
 Controls (all in the window):
 
@@ -19,15 +9,12 @@ Controls (all in the window):
     space       hold (target = current marker position)
     q / Esc     quit
 
-Gains print on every change so you can copy them into MOVE_TO_KP/KI/KD in .env.
-A single persistent loop owns active-operator control and drives to the current
-target; changing the target or a gain just affects the next tick. Only run ONE
-thing that takes control at a time.
+Only run ONE thing that takes active-operator control at a time.
 
 Usage::
 
-    uv run python operators/move_to/calibrate.py       # once, click bottom/top
-    uv run python operators/move_to/debug_move_to.py    # robot must be in the room
+    uv run move-to-calibrate   # once, click bottom/top
+    uv run move-to-debug       # robot must be in the room
 """
 from __future__ import annotations
 

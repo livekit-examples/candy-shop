@@ -1,17 +1,9 @@
-"""Interactive 2-click safe-zone calibration.
-
-Grabs the first ``overhead_camera`` frame, then opens a window to click the two
-lines the slider travels between (perpendicular to ``config.AXIS``):
-
-  1. the pos 0 line
-  2. the pos 100 line
-
-Only the coordinate along the axis matters. Bounds are saved to
-``safe_zone.yaml`` as normalized image coordinates.
+"""Interactive 2-click safe-zone calibration: click the pos 0 line then the pos 100
+line; bounds are saved to ``safe_zone.yaml`` as normalized image coordinates.
 
 Usage::
 
-    uv run python operators/move_to/calibrate.py   # robot must be in the room
+    uv run move-to-calibrate   # robot must be in the room
 """
 from __future__ import annotations
 
