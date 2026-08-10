@@ -1,20 +1,15 @@
 """The recorder's RPC surface — the contract between the two processes.
 
-Both sides import this module so a rename can't drift. Payloads and replies are
-JSON objects as strings; every reply carries ``ok``, plus ``error`` when false.
-
-Two caps shape it. A reply must fit one LiveKit RPC payload (~15 KiB), so
-``METHOD_EPISODES`` is paginated. And a reply must beat the caller's response
-timeout (~10 s), so relabel/delete — whole-corpus rewrites taking seconds to
-minutes — are *jobs*: the handler validates, schedules, and returns, and the UI
-watches ``busy``/``error``/``revision`` in ``METHOD_STATUS``.
-
-``ATTR_ROLE`` lets the UI find the recorder without being told an identity. Its
-prefix is deliberately not ``vla_demo.*``: that is portal-playground's
-operator-discovery contract, and a recorder must not look claimable to visitors.
+Both sides import this module so a rename can't drift. Payloads/replies are JSON
+strings; every reply carries ``ok`` (plus ``error`` when false). Two caps shape
+it: a reply must fit one LiveKit RPC payload (~15 KiB), so ``METHOD_EPISODES`` is
+paginated; and a reply must beat the ~10 s response timeout, so relabel/delete
+run as jobs the UI watches via ``busy``/``error``/``revision`` in the status.
 """
 from __future__ import annotations
 
+# Lets the UI find the recorder without an identity. Not ``vla_demo.*``: that is
+# portal-playground's discovery contract, and a recorder must not look claimable.
 ATTR_ROLE = "operators.teleoperator.role"
 ROLE_RECORDER = "recorder"
 

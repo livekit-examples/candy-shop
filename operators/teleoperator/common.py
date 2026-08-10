@@ -1,9 +1,5 @@
-"""Shared scaffolding for the recorder peer and the review UI: env loading,
-token minting, an fps pacer.
-
-A trimmed sibling of `vla_demo.common`, which also carries GPU-residency,
-autocast, and settle-gate helpers — none of which mean anything here.
-"""
+"""Shared scaffolding for the recorder and review UI: env loading, token
+minting, an fps pacer."""
 from __future__ import annotations
 
 import asyncio
@@ -21,10 +17,7 @@ from livekit.protocol.room import RoomConfiguration
 
 def load_env(start: Optional[pathlib.Path] = None) -> None:
     """Load `.env` walking up from `start` to the filesystem root (plus cwd).
-
-    Nearest wins (`override=False`), so the repo-root `.env` is found from
-    anywhere while a project-local one still overrides it. `.env.local` always
-    overrides."""
+    Nearest wins (`override=False`); `.env.local` always overrides."""
     start = (start or pathlib.Path.cwd()).resolve()
     seen: set[pathlib.Path] = set()
     for d in (start, *start.parents, pathlib.Path.cwd().resolve()):
@@ -51,8 +44,8 @@ def mint_token(
     name: str | None = None,
     attributes: dict[str, str] | None = None,
 ) -> str:
-    """Mint a 6h join token. `attributes` are published as participant
-    attributes every peer can read live."""
+    """Mint a 6h join token. `attributes` publish as participant attributes every
+    peer can read live."""
     grants = api.VideoGrants(
         room_join=True, room=room, can_publish=True, can_publish_data=True,
         can_subscribe=True, can_update_own_metadata=True,
@@ -69,10 +62,8 @@ def mint_token(
 
 
 def user_config_dir() -> pathlib.Path:
-    """Per-user, per-machine settings dir — key bindings, window geometry.
-
-    Not the project directory: which key your foot pedal sends is a property of
-    your desk, not of the repo, and it must not land in a commit."""
+    """Per-user, per-machine settings dir (key bindings, window geometry). Not the
+    project dir — a foot pedal's key is a property of your desk, not the repo."""
     if sys.platform == "darwin":
         base = pathlib.Path.home() / "Library" / "Application Support"
     elif sys.platform.startswith("win"):
@@ -85,11 +76,7 @@ def user_config_dir() -> pathlib.Path:
 
 def portal_config_path(package_dir: pathlib.Path) -> pathlib.Path:
     """Resolve the wire contract: `PORTAL_CONFIG` if set, else the repo-root
-    `portal.yaml` shared by every candy-shop process. The env override is how you
-    record a rig whose contract lives in another suite (see portal.yaml's header).
-
-    Resolved from this module's location (repo root is ``parents[2]`` of
-    ``operators/teleoperator/common.py``), so it's correct regardless of what the
+    `portal.yaml`. Resolved from this module's location, so it ignores what the
     caller passes for ``package_dir``."""
     if override := os.environ.get("PORTAL_CONFIG"):
         return pathlib.Path(override).expanduser().resolve()
@@ -97,22 +84,17 @@ def portal_config_path(package_dir: pathlib.Path) -> pathlib.Path:
 
 
 def camera_names(cfg) -> tuple[str, ...]:
-    """Every video track the contract declares, in declaration order — derived
-    rather than hardcoded, so `PORTAL_CONFIG` picks up another rig's cameras."""
+    """Every video track the contract declares, in declaration order."""
     return (*cfg.video_tracks, *(s.name for s in cfg.frame_video_tracks))
 
 
 def contract_camera_names(path: pathlib.Path) -> tuple[str, ...]:
     """The same list, read straight from the contract's YAML.
 
-    For the review UI, which needs the track names but must **not** import
-    ``livekit.portal``: Portal's FFI and the ``livekit`` rtc SDK each statically
-    link libwebrtc, so loading both into one process makes dyld register every
-    ``RTC*`` ObjC class twice — dozens of "implemented in both ... may cause
-    spurious casting failures and mysterious crashes" warnings on macOS. The UI
-    genuinely needs the rtc SDK (it joins as a plain participant), so this is the
-    side that gives up Portal. Byte-stream and WebRTC codecs share the ``videos``
-    key, so one read covers both, in declaration order."""
+    For the review UI, which must NOT import ``livekit.portal``: Portal and the
+    rtc SDK each statically link libwebrtc, so loading both into one process
+    double-registers every ``RTC*`` ObjC class and crashes on macOS. The UI needs
+    the rtc SDK, so it gives up Portal."""
     import yaml
 
     contract = yaml.safe_load(path.read_text()) or {}

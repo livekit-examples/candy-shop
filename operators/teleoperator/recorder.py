@@ -1,40 +1,14 @@
-"""HITL LeRobotDataset recorder for the leslider rig.
+"""HITL LeRobotDataset recorder driving a live Portal stream.
 
-Drives a `LeRobotDataset` from a live Portal stream. ``observe`` feeds a
-ring of recent observations; ``record`` pairs an executed action with the
-observation the operator was responding to and writes one row. The dataset
-is built lazily by ``ensure_dataset`` once a frame reveals the camera
-resolution (the wire schema doesn't pin width/height), and resumed from
-disk if it already exists, so a corpus can grow across sessions. Episodes
-flush on a background thread so the operator's tick rate isn't held up by
-encoding.
+``record`` pairs an executed action (any sender — human teleop or remote policy)
+with the observation the operator was responding to and writes one row.
 
-The wire fields are the leslider's: six arm ``.pos`` plus one ``slider.vel``
-(raw ticks/s, sign-magnitude). Nothing here is special-cased to positions —
-``state_field_names``/``action_field_names`` come straight from the wire
-contract, so ``slider.vel`` lands in every row's state and action exactly like
-a ``.pos`` field, as a plain float.
-
-Because recording is driven by the *action* stream — and Portal forwards
-every operator's actions (``action_subscription``) tagged with their
-``sender`` — this records human teleop and remote-policy actions alike.
-
-``suspend``/``resume`` bracket an offline mutation of the corpus: the dataset is
-not safely readable, let alone rewritable, while a session holds it open.
-Suspend closes it properly; resume re-opens via the same path a fresh process
-takes.
-
-**One writer thread owns every dataset mutation.** ``record`` runs on Portal's
-callback thread and must be O(1) there: measured, ``add_frame`` costs ~2 ms median
-and up to 24 ms, against a 33 ms tick at 30 fps. Held on the callback thread that
-starves Portal's video-receive worker of the GIL, libwebrtc's native queue
-overflows ("dropped N queued frames"), observation *delivery* turns bursty, and
-rows then fail to pair because the newest observation received before an action is
-hundreds of milliseconds old — even though the average obs rate still reads 30/s.
-So ``record`` only pairs (a 0.001 ms ring scan) and enqueues; the writer thread
-does the decode, the frame build, the ``add_frame``, and the ``save_episode``.
-Rows, saves and discards go through one ordered queue, so a save can never
-overtake the rows it belongs to.
+Invariant: one writer thread owns every dataset mutation. ``record`` runs on
+Portal's callback thread and must be O(1) there — holding it starves Portal's
+video-receive worker of the GIL, libwebrtc's queue overflows, and observation
+delivery turns bursty. So ``record`` only pairs (a ~0.001 ms ring scan) and
+enqueues; the writer thread does the decode, add_frame, and save_episode, all
+through one ordered queue so a save never overtakes its rows.
 """
 from __future__ import annotations
 
@@ -87,35 +61,32 @@ class Recorder:
         self._cameras = tuple(cameras)
         self._task = task
         self._max_obs_age_us = max_obs_age_us
-        # expanduser: neither python-dotenv nor pathlib expands `~`, so a
-        # DATASET_ROOT of `~/.cache/...` would create a directory *named* `~`.
+        # expanduser: a DATASET_ROOT of `~/.cache/...` would otherwise create a
+        # directory literally named `~`.
         self._root = (
             Path(root).expanduser() if root is not None else Path("data") / repo_id
         )
         self._robot_type = robot_type
 
         # Ring of recent (obs, local_recv_us) pairs. local_recv_us is this
-        # machine's wall clock when the obs arrived, so leader actions match
-        # against when the operator *saw* an obs (teleop clock) rather than
-        # when the robot *captured* it (robot clock). ~500ms at 30Hz.
+        # machine's wall clock at obs arrival, so leader actions match against
+        # when the operator *saw* an obs (teleop clock), not when the robot
+        # *captured* it (robot clock).
         self._history: deque[tuple[Observation, int]] = deque(maxlen=history)
 
-        # Built lazily by ensure_dataset() once a frame reveals the resolution.
         self._dataset: Optional[LeRobotDataset] = None
         self._features: dict | None = None
         self._recording = False
         self._episode_count = 0
 
-        # The single writer. Bounded queue: unbounded would trade dropped rows
-        # for unbounded memory, since each item pins a whole observation's frame
-        # bytes (~1.8 MB for two 640x480 cameras).
+        # Bounded queue: unbounded would trade dropped rows for unbounded memory,
+        # since each item pins a whole observation's frame bytes (~1.8 MB for two
+        # 640x480 cameras).
         self._queue: queue.Queue = queue.Queue(maxsize=max(write_queue, 1))
         self._writer: threading.Thread | None = None
         self._pending_saves = 0
         self._queued_rows = 0
-        # Drops are counted by CAUSE. One number can't tell you whether the obs
-        # stream is slow, the two machines' clocks disagree, or add_frame is
-        # raising on every row — and those have nothing to do with each other.
+        # Drops counted by cause: the causes have unrelated fixes.
         self._dropped_stale = 0    # paired obs older than max_obs_age_us
         self._dropped_error = 0    # add_frame raised
         self._dropped_unpaired = 0  # no obs old enough to pair with at all
@@ -123,31 +94,25 @@ class Recorder:
         self._skips_since_report = 0
         self._warned_write_error = False
 
-        # Rolling receive times, for the observed obs rate. A pairing age can
-        # only ever be as good as the gap between observations, so this is the
-        # first thing to look at when rows drop as stale.
+        # Rolling receive times, for the observed obs rate.
         self._obs_recv: deque[int] = deque(maxlen=64)
         self._last_age_us = 0
         self._worst_age_us = 0
 
-        # Counted here, not read off the dataset's episode buffer, so the frame
-        # counter doesn't depend on lerobot internals.
         self._rows = 0
 
         # Set while an offline mutation owns the dataset; checked on the record
         # hot path so an in-flight write can't land on a half-closed dataset.
         self._suspended = threading.Event()
 
-        # Bumped when the saved-episode set changes.
-        self._revision = 0
+        self._revision = 0  # bumped when the saved-episode set changes
 
-        # Seeded from disk at open, appended on save, re-seeded after a mutation
-        # — never re-read on demand, since mid-session the metadata parquet is
-        # footerless (see dataset.py's docstring).
+        # Never re-read on demand: mid-session the metadata parquet is footerless
+        # (see dataset_repair). Seeded at open, appended on save, re-seeded after
+        # a mutation.
         self._episodes: list[dict] = []
 
-        # Reused verbatim on resume, so a rebuilt dataset keeps identical video
-        # features.
+        # Reused verbatim on resume, so a rebuilt dataset keeps identical video features.
         self._frame_shape: tuple[int, int] | None = None
 
     # --- lifecycle ----------------------------------------------------------
@@ -186,19 +151,16 @@ class Recorder:
 
     @property
     def drop_causes(self) -> dict[str, int]:
-        """Why rows were dropped this episode. `stale` = the paired observation
-        was too old; `unpaired` = no observation old enough to pair with (a slow
-        obs stream, or the action clock running behind ours); `error` = add_frame
-        raised, which is a schema/disk problem, not a timing one; `backlog` = the
-        writer thread fell behind and the queue was full (disk or encoder too
-        slow for the frame rate)."""
+        """Why rows were dropped this episode: `stale` (paired obs too old),
+        `unpaired` (no obs old enough / action clock behind), `error` (add_frame
+        raised — schema/disk), `backlog` (writer fell behind, queue full)."""
         return {"stale": self._dropped_stale, "unpaired": self._dropped_unpaired,
                 "error": self._dropped_error, "backlog": self._dropped_backlog}
 
     @property
     def queue_depth(self) -> int:
-        """Rows waiting on the writer. Sustained non-zero means the disk or the
-        video encoder is the bottleneck, not the network."""
+        """Rows waiting on the writer. Sustained non-zero = disk or encoder
+        bottleneck, not the network."""
         return self._queue.qsize()
 
     @property
@@ -241,18 +203,15 @@ class Recorder:
         return self._task
 
     def set_task(self, task: str) -> None:
-        """Relabel subsequent rows. Intended for use between episodes — every
-        frame is stamped with the task current at ``add_frame`` time, so
-        changing it mid-episode would split one trajectory across two labels
-        (the caller gates this to when not recording)."""
+        """Relabel subsequent rows. Between episodes only — each frame is stamped
+        at ``add_frame`` time, so changing it mid-episode would split one
+        trajectory across two labels (the caller gates this)."""
         self._task = task
 
     def ensure_dataset(self, frame=None) -> bool:
-        """Build (or resume) the dataset from a received frame's resolution.
-        Returns True if it built on this call, False if already built.
-
-        ``frame`` may be omitted once a resolution has been seen — that's the
-        ``resume`` path after a mutation, which must not wait for a new frame."""
+        """Build (or resume) the dataset from a frame's resolution. True if it
+        built on this call, False if already built. ``frame`` may be omitted once
+        a resolution has been seen (the ``resume`` path after a mutation)."""
         if self._dataset is not None:
             return False
         if frame is not None:
@@ -261,8 +220,8 @@ class Recorder:
             return False
         height, width = self._frame_shape
 
-        # Mirror the wire schema into lerobot's hw_features shape: state
-        # fields become named floats; each camera goes in as (H, W, 3).
+        # Mirror the wire schema into lerobot's hw_features shape: state fields
+        # become named floats; each camera goes in as (H, W, 3).
         obs_hw: dict[str, Any] = {name: float for name in self._state_field_names}
         for cam in self._cameras:
             obs_hw[cam] = (height, width, 3)
@@ -274,9 +233,8 @@ class Recorder:
 
         os.environ.setdefault("HF_HUB_OFFLINE", "1")  # local recording, no Hub calls
         if (self._root / "meta" / "tasks.parquet").exists():
-            # Self-heal a dataset left footerless by a hard kill / segfault last
-            # run (ParquetWriter only writes footers at finalize()). No-op if the
-            # files are already valid. See dataset_repair.
+            # Self-heal a dataset left footerless by a hard kill last run. No-op
+            # if already valid. See dataset_repair.
             try:
                 if repair_dataset(self._root):
                     logger.warning("repaired footerless parquet(s) from a prior crash")
@@ -290,34 +248,31 @@ class Recorder:
         else:
             if self._root.exists():
                 logger.warning("wiping incomplete dataset at %s", self._root)
-                shutil.rmtree(self._root)  # stub from an aborted run; create would error
+                shutil.rmtree(self._root)  # stub from an aborted run; create() would error
             logger.info("creating dataset at %s", self._root)
             self._dataset = LeRobotDataset.create(
                 repo_id=self._repo_id, fps=self._fps, features=self._features,
                 root=self._root, robot_type=self._robot_type, use_videos=True,
                 image_writer_threads=4, streaming_encoding=True, encoder_threads=2,
             )
-        # Flush every episode's metadata row to disk immediately instead of
-        # buffering (default 10). Buffered rows live only in memory, so a hard
-        # kill would lose up to 9 saved episodes' metadata even though their data
-        # + video are on disk. With size=1, footer repair can recover them all.
+        # size=1 flushes each episode's metadata row immediately (default 10).
+        # Buffered rows live only in memory, so a hard kill would lose up to 9
+        # saved episodes' metadata; with size=1, footer repair recovers them all.
         self._dataset.meta._metadata_buffer_size = 1
         self._episode_count = self._dataset.num_episodes
-        # Valid to read disk here and only here: the dataset was just opened, so
-        # every footer is written (repaired above if a prior run died).
+        # Safe to read disk here and only here: just opened, so every footer is
+        # written (repaired above if a prior run died).
         self._episodes = read_episodes(self._root, self._fps, self._cameras)
         self._start_writer()
         return True
 
     def start_episode(self) -> bool:
-        """Begin recording. Resets the obs ring so the first row pairs
-        against an obs from within the episode, not from before.
+        """Begin recording. Resets the obs ring so the first row pairs against an
+        obs from within the episode.
 
-        Returns False (a no-op) if the previous episode is still saving:
-        blocking on that encode here would freeze the caller's thread (the
-        teleop tick loop shares it with Portal's frame-delivery callbacks, so
-        a join stalls the whole video receive path), and racing the save
-        worker on the shared dataset would corrupt it. The caller retries."""
+        Returns False (no-op) if the previous episode is still saving: blocking on
+        that encode would stall Portal's callback thread, and racing the save
+        worker would corrupt the dataset. The caller retries."""
         if (
             self._dataset is None
             or self._recording
@@ -338,16 +293,16 @@ class Recorder:
     def end_episode(self) -> None:
         """Stop recording and hand the episode to the writer.
 
-        Queued, not done inline: rows may still be in flight, and the save has to
-        land *after* them. `has_pending_frames()` can't be consulted here — it
-        reflects the dataset buffer, which the writer hasn't filled yet."""
+        Queued, not inline: rows may still be in flight, and the save must land
+        *after* them. `has_pending_frames()` can't be consulted here — it reflects
+        the dataset buffer, which the writer hasn't filled yet."""
         if not self._recording:
             return
         self._recording = False
         if not self._queued_rows:
-            return  # nothing was captured; there is no episode to save
-        # Index and task are snapshotted here; `length` is filled in by the
-        # writer, which is the only thing that knows how many rows really landed.
+            return  # nothing captured; no episode to save
+        # `length` is filled in by the writer, the only thing that knows how many
+        # rows really landed.
         self._pending_saves += 1
         self._enqueue(("save", {"index": self._episode_count, "task": self._task}))
         self._episode_count += 1
@@ -360,10 +315,9 @@ class Recorder:
         self._enqueue(("discard", None))
 
     def flush(self) -> None:
-        """Block until every accepted row and save has been written.
-
-        For shutdown and tests. Never call from Portal's callback thread — that
-        is exactly the stall this design exists to prevent."""
+        """Block until every accepted row and save is written. For shutdown and
+        tests. Never call from Portal's callback thread — that is the stall this
+        design exists to prevent."""
         while not self._queue.empty():
             if self._writer is None or not self._writer.is_alive():
                 return  # no one left to drain it; don't hang
@@ -380,21 +334,19 @@ class Recorder:
     def suspend(self) -> None:
         """Close the dataset so an offline rewrite can own the files.
 
-        Order matters: flags drop *before* the dataset is touched, then a brief
-        sleep lets any ``add_frame`` already past the check finish (sub-ms)
-        before ``finalize`` closes the writers under it. Flags rather than a lock
-        because ``record`` runs on the Portal callback thread, and a lock held
-        across a multi-minute rewrite would stall the whole tick loop."""
+        Flags drop *before* the dataset is touched, then a brief sleep lets any
+        in-flight ``add_frame`` finish before ``finalize`` closes the writers.
+        Flags not a lock: ``record`` runs on the callback thread, and a lock held
+        across a multi-minute rewrite would stall the tick loop."""
         self._suspended.set()
         self._recording = False
         time.sleep(0.05)
-        # Retire the writer first: it is still draining rows, and clearing the
-        # buffer underneath it would race an add_frame.
+        # Retire the writer first: clearing the buffer under it would race an add_frame.
         self._stop_writer()
         if self._dataset is not None:
             if self._dataset.has_pending_frames():
-                # A rewrite would silently drop the in-flight episode anyway;
-                # discard it so the rewrite starts from a fully-saved corpus.
+                # A rewrite drops the in-flight episode anyway; discard it so the
+                # rewrite starts from a fully-saved corpus.
                 self._dataset.clear_episode_buffer(delete_images=True)
             self._dataset.finalize()
         self._dataset = None
@@ -411,8 +363,7 @@ class Recorder:
     # --- streams ------------------------------------------------------------
 
     def observe(self, obs: Observation) -> None:
-        """Append an observation to the ring, stamped with its local
-        receive time (this fires on receipt)."""
+        """Append an observation to the ring, stamped with its local receive time."""
         now = int(time.time() * 1_000_000)
         self._history.append((obs, now))
         self._obs_recv.append(now)
@@ -423,14 +374,12 @@ class Recorder:
         if not self._recording or self._suspended.is_set():
             return
 
-        # Pick the reference timestamp and the obs clock to compare against:
-        #   * Policy actions carry `in_reply_to_ts_us`, a robot-clock capture
-        #     time naming the exact obs consumed — match on obs capture ts
-        #     (same clock), an exact pairing.
-        #   * Leader actions are open-loop: the human reacts to the most
-        #     recently *received* obs — match the action's teleop send time
-        #     against each obs's local receive time (both teleop clock),
-        #     avoiding the robot/teleop skew + transport latency.
+        # Reference timestamp + obs clock to match on:
+        #   * Policy actions carry `in_reply_to_ts_us` (robot-clock capture time
+        #     naming the exact obs) — match on obs capture ts, an exact pairing.
+        #   * Leader actions are open-loop: match the action's teleop send time
+        #     against each obs's local receive time (both teleop clock), avoiding
+        #     robot/teleop skew + transport latency.
         match_on_recv = action.in_reply_to_ts_us is None
         target_ts = action.timestamp_us if match_on_recv else action.in_reply_to_ts_us
 
@@ -442,9 +391,8 @@ class Recorder:
                 aligned, age = obs, target_ts - obs_ts
                 break
         if aligned is None:
-            # Normal for the first ticks of an episode; sustained, it means every
-            # buffered obs is NEWER than the action — i.e. the action's clock runs
-            # behind this machine's, which is what cross-machine skew looks like.
+            # Normal for the first ticks; sustained, every buffered obs is newer
+            # than the action — the action's clock runs behind ours (cross-machine skew).
             self._dropped_unpaired += 1
             self._skips_since_report += 1
             return
@@ -455,8 +403,8 @@ class Recorder:
             self._skips_since_report += 1
             return  # would mislabel the row
 
-        # Hand off and return. Everything past this point costs milliseconds and
-        # would be paid on Portal's callback thread (see the module docstring).
+        # Hand off: everything past here costs milliseconds and would be paid on
+        # the callback thread (see module docstring).
         values = {k: float(v) for k, v in action.values.items()}
         if self._enqueue(("row", (aligned, values, self._task))):
             self._queued_rows += 1
@@ -466,8 +414,7 @@ class Recorder:
 
     def drain_skips(self) -> int:
         """Drops since the last call, for the console report. Separate from
-        ``skipped_frames`` (cumulative per episode) so resetting one doesn't make
-        the counter flicker to zero."""
+        ``skipped_frames`` (cumulative) so resetting one doesn't flicker it."""
         n, self._skips_since_report = self._skips_since_report, 0
         return n
 
@@ -483,9 +430,8 @@ class Recorder:
     # --- the writer thread --------------------------------------------------
 
     def _enqueue(self, item: tuple) -> bool:
-        """Post to the writer without ever blocking the caller. False if the
-        queue is full — blocking here would push backpressure straight onto
-        Portal's callback thread, which is the whole thing we're avoiding."""
+        """Post to the writer without blocking the caller. False if the queue is
+        full — blocking would push backpressure onto the callback thread."""
         try:
             self._queue.put_nowait(item)
             return True
@@ -501,8 +447,8 @@ class Recorder:
         self._writer.start()
 
     def _stop_writer(self) -> None:
-        """Drain the queue, then retire the thread. Called before finalize and
-        before an offline mutation, so every accepted row is on disk first."""
+        """Drain the queue, then retire the thread. So every accepted row is on
+        disk before finalize or an offline mutation."""
         if self._writer is None:
             return
         self._queue.put((None, None))  # sentinel, after everything queued
@@ -510,8 +456,8 @@ class Recorder:
         self._writer = None
 
     def _write_worker(self) -> None:
-        """The only thing that mutates the dataset. Single-threaded and strictly
-        in queue order, so a save can never overtake its own rows."""
+        """The only thing that mutates the dataset. Strictly in queue order, so a
+        save can never overtake its own rows."""
         while True:
             kind, payload = self._queue.get()
             try:
@@ -537,8 +483,8 @@ class Recorder:
             })
             self._rows += 1
         except Exception:
-            # A bad row must not end the demonstration. Drop it, count it, keep
-            # going; log the first per episode with a traceback.
+            # A bad row must not end the demonstration: drop, count, continue;
+            # log the first per episode with a traceback.
             if not self._warned_write_error:
                 logger.exception("add_frame failed; dropping row and continuing")
                 self._warned_write_error = True
@@ -558,20 +504,19 @@ class Recorder:
             return
         finally:
             self._pending_saves -= 1
-        # `length` is only knowable here: it's the rows that actually landed. The
-        # video offsets likewise — lerobot fills them in as it writes the episode,
-        # so they're read back off the metadata it just produced.
+        # `length` and video offsets are only knowable here — read back off the
+        # metadata lerobot just wrote.
         entry = {**entry, "length": self._rows,
                  "seconds": round(self._rows / self._fps, 2) if self._fps else 0.0,
                  "videos": self._latest_video_slices()}
         self._episodes.append(entry)
-        self._revision += 1  # the episode list grew
+        self._revision += 1
         logger.info("episode %d saved (%d rows) in %.2fs",
                     episode, self._rows, time.perf_counter() - started)
 
     def _latest_video_slices(self) -> dict:
-        """Per-camera video offsets for the episode just saved, from lerobot's own
-        episode metadata. `{}` if it isn't there — playback degrades, nothing else."""
+        """Per-camera video offsets for the episode just saved. `{}` if absent —
+        playback degrades, nothing else."""
         try:
             latest = self._dataset.meta.latest_episode or {}
         except Exception:

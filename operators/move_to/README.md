@@ -2,18 +2,11 @@
 
 Owns the leslider's carriage. The slider runs in velocity mode, so placement is
 closed-loop from vision: the robot carries an ArUco marker (4x4, id 10), and a
-PID loop drives `slider.vel` until that marker sits on a target line in the
-overhead image.
-
-```
-overhead frame ─► ArUco detect ─► pixel error (target - marker) along AXIS
-                                          │
-                                          ▼
-                                       PID loop ─► slider.vel ─► robot
-```
+PID loop drives `slider.vel` (raw ticks/s) until that marker sits on a target
+line in the overhead image.
 
 `pos` is 0..100 across a calibrated safe zone (two lines perpendicular to the
-slider's travel). Requests are capped to `[0, 100]`. Set `AXIS` in `config.py`
+slider's travel); requests are capped to `[0, 100]`. Set `AXIS` in `config.py`
 to `"vertical"` or `"horizontal"` to match the camera mounting.
 
 ## Layout

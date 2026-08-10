@@ -1,17 +1,8 @@
-"""What the setup screen needs: the ports and corpora on this machine.
+"""Setup-screen inputs: the serial ports and corpora on this machine.
 
-A `DATASET_ROOT` pinned in a `.env` has a bad failure mode — you set it once,
-forget it, and later find you appended two rigs' takes to one corpus, or trained on
-a stale copy, with nothing erroring. So the choice is made per session, in the
-window (see `run.Runtime`), from what this module enumerates. Env vars only
-*preselect* those answers.
-
-`from_env` is the exception: a fully-specified environment opens immediately, for
-unattended runs where there is nobody to ask.
-
-New datasets default to `HF_LEROBOT_HOME/<repo_id>` — where a bare
-`--dataset.repo_id` resolves at training time, so what you record trains with no
-extra flags.
+The dataset choice is made per session in the window (env vars only *preselect*),
+because a pinned `DATASET_ROOT` silently appends two rigs to one corpus or trains
+on a stale copy. `from_env` is the exception for unattended runs.
 """
 from __future__ import annotations
 
@@ -46,9 +37,8 @@ class Corpus:
 
 
 def search_roots(extra: Iterable[Path] = ()) -> list[Path]:
-    """lerobot's home, this project's `data/`, then the sibling suites' `data/` —
-    that last one because a related suite may have recorded a corpus worth
-    continuing here (e.g. `vla-demo` before the candy-shop split)."""
+    """lerobot's home, this project's `data/`, then sibling suites' `data/` (a
+    related suite may hold a corpus worth continuing here)."""
     roots = [lerobot_home(), PROJECT_DIR / "data", Path("data").resolve()]
     roots.extend(PROJECT_DIR.parent / s / "data" for s in ("vla-demo", "candy-shop-demo"))
     roots.extend(Path(p).expanduser() for p in extra)
@@ -57,13 +47,9 @@ def search_roots(extra: Iterable[Path] = ()) -> list[Path]:
 
 
 def discover(roots: Sequence[Path]) -> list[Corpus]:
-    """Every LeRobotDataset under `roots`, most episodes first — the corpus you're
-    actively building is almost always the biggest, so it makes the best default.
-
-    A dataset is a directory holding `meta/info.json`. Repo ids are one or two
-    path segments, so scan exactly that depth instead of walking whole trees:
-    lerobot's home also holds `hub/` caches and `outputs/`.
-    """
+    """Every LeRobotDataset under `roots`, most episodes first (the biggest is the
+    best default). Repo ids are one or two path segments, so scan exactly that
+    depth rather than walking whole trees (lerobot's home also holds `hub/`)."""
     found: dict[Path, Corpus] = {}
     for root in roots:
         if not root.is_dir():
@@ -114,12 +100,9 @@ USB_SERIAL_HINTS = ("usbmodem", "usbserial", "ttyacm", "ttyusb")
 
 
 def looks_like_leader(device: str) -> bool:
-    """Whether a port plausibly *is* an SO-101 rather than merely being a port.
-
-    A Mac lists a debug console, a Bluetooth channel, and any DJI microphone you
-    once paired as serial devices. Pre-selecting one of those as the leader arm is
-    worse than pre-selecting nothing, so this gates the default rather than the
-    list — an unusual adapter is still choosable, just not assumed."""
+    """Whether a port plausibly *is* an SO-101, not merely a port. Gates the
+    default (not the list) — a Mac lists debug consoles and Bluetooth channels as
+    serial devices, and pre-selecting one is worse than pre-selecting nothing."""
     name = device.lower()
     return (not any(k in name for k in ("bluetooth", "debug-console"))
             and any(k in name for k in USB_SERIAL_HINTS))
@@ -157,10 +140,8 @@ def default_leader_port(env_port: Optional[str] = None) -> str:
 def setup_options(env_port: Optional[str], env_repo_id: Optional[str],
                   env_task: Optional[str],
                   roots: Optional[Sequence[Path]] = None) -> dict:
-    """Everything the setup screen needs, as plain JSON.
-
-    Assembled on the recorder because it owns the serial bus and the disk — the
-    window may be on another machine entirely."""
+    """Everything the setup screen needs, as plain JSON. Assembled on the
+    recorder because it owns the serial bus and disk — the window may be remote."""
     return {
         "ports": [{"device": device, "description": description,
                     "likely": looks_like_leader(device)}
@@ -178,8 +159,7 @@ def setup_options(env_port: Optional[str], env_repo_id: Optional[str],
 
 
 def valid_repo_id(repo_id: str) -> bool:
-    """`org/name` — the LeRobotDataset convention, and what a bare
-    `--dataset.repo_id` resolves against at training time."""
+    """`org/name` — the LeRobotDataset convention `--dataset.repo_id` resolves against."""
     return repo_id.count("/") == 1 and all(part.strip() for part in repo_id.split("/"))
 
 
@@ -206,9 +186,8 @@ def from_env(
 ) -> Optional[Session]:
     """A fully-specified session from the environment, or None to ask the window.
 
-    "Fully specified" means a port plus *somewhere to write*. This is the
-    unattended path — systemd, a fleet script — where there is nobody to ask; when
-    it returns None the recorder joins the room and waits for setup instead."""
+    "Fully specified" means a port plus somewhere to write — the unattended path.
+    None means the recorder joins the room and waits for setup instead."""
     if not env_port or not (env_root or env_repo_id):
         return None
     repo_id = env_repo_id or DEFAULT_REPO_ID

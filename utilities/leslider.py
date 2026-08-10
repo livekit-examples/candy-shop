@@ -1,11 +1,8 @@
 """Hardware builders and observation shaping for the leslider rig.
 
-Concentrates everything that's about *the hardware* — cameras and the SO-101
-follower — so `robot/run.py` can stay focused on the Portal-side flow.
-
-The leslider is an SO-101 arm on a linear slider. The six arm motors are
-normalized `.pos`; the slider's STS3215 runs in VELOCITY mode, reporting and
-accepting a raw ticks/s `slider.vel` (sign-magnitude; 0 = stop).
+SO-101 arm on a linear slider: six arm motors as normalized `.pos`; the slider's
+STS3215 runs in velocity mode, reporting/accepting raw ticks/s `slider.vel`
+(sign-magnitude; 0 = stop).
 """
 from __future__ import annotations
 
@@ -25,8 +22,7 @@ CAMERAS: tuple[str, ...] = ("arm_camera", "overhead_camera")
 
 
 def build_follower(fps: int) -> SO101SliderFollower:
-    """Construct the SO-101 slider follower from environment variables.
-    """
+    """Construct the SO-101 slider follower from environment variables."""
     width = env_int("LESLIDER_CAM_WIDTH", 640)
     height = env_int("LESLIDER_CAM_HEIGHT", 480)
     cam_defaults = {
@@ -61,8 +57,7 @@ def build_follower(fps: int) -> SO101SliderFollower:
 def split_state_frames(
     observation: dict,
 ) -> tuple[dict[str, float], dict[str, np.ndarray]]:
-    """Split one follower observation into Portal state and video frames.
-    """
+    """Split one follower observation into Portal state and video frames."""
     state = {
         key: float(value)
         for key, value in observation.items()

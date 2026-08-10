@@ -1,30 +1,11 @@
-"""Shared MolmoAct2 wiring for the candy-shop policy operator.
+"""Shared MolmoAct2 wiring for train.py and run.py: default checkpoint and the
+drop-the-slider rule.
 
-Everything both ``train.py`` and ``run.py`` need to agree on lives here so the
-two never drift: the default checkpoint, the *drop-the-slider* rule, and the
-norm-stats side-file.
-
-Why drop the slider
--------------------
-The leslider wire contract carries **7** fields — six arm ``.pos`` plus one
-``slider.vel`` (see ``utilities/rest_pose.py``). MolmoAct2's SO-101 checkpoint
-only knows the **six-DOF arm**; it has no concept of a linear slider. So both
-training and inference operate on the six arm dims only:
-
-* **training** — a dataset recorded on this rig has 7-dim ``observation.state``
-  and ``action`` vectors; we slice the ``slider.vel`` column out of the tensors,
-  the feature metadata, and the normalization stats before the policy ever sees
-  them (:class:`SliderDroppedDataset`).
-* **inference** — the operator feeds the six arm ``.pos`` as state, and pins
-  ``slider.vel = 0`` on the wire (the ``move_to`` operator owns the slider).
-
-Norm stats
-----------
-MolmoAct2's normalizer is built from the dataset quantile stats. ``train.py``
-persists those stats into the checkpoint via the saved processor pipeline
-(``preprocessor.save_pretrained``), so ``run.py`` just reloads the processors
-from the checkpoint dir — no separate stats file needed. Released checkpoints
-ship their processors the same way.
+MolmoAct2's SO-101 checkpoint is a six-DOF arm with no slider, but the leslider
+wire contract carries a 7th ``slider.vel`` field (see ``utilities/rest_pose.py``).
+So it is dropped end to end: training slices the column out of tensors, feature
+metadata, and norm stats (:class:`SliderDroppedDataset`); inference feeds the six
+arm ``.pos`` and pins ``slider.vel = 0`` (the ``move_to`` operator owns the slider).
 """
 from __future__ import annotations
 
@@ -37,12 +18,11 @@ from lerobot.utils.constants import ACTION, OBS_STATE
 
 from utilities.rest_pose import ARM_POS_KEYS
 
-# The default LeRobot-format MolmoAct2 checkpoint for the SO-101 arm. Six-DOF,
-# two cameras (primary + wrist). Ships the SO-100/101 joint-frame correction in
-# its own config, so zero-shot deployment needs no extra flags.
+# Six-DOF, two cameras; ships the SO-100/101 joint-frame correction, so zero-shot
+# deployment needs no extra flags.
 DEFAULT_CHECKPOINT = "lerobot/MolmoAct2-SO100_101-LeRobot"
 
-# The dims MolmoAct2 controls: the six arm .pos, in the load-bearing wire order.
+# The six arm .pos MolmoAct2 controls, in load-bearing wire order.
 ACTION_NAMES: tuple[str, ...] = ARM_POS_KEYS
 
 
@@ -54,10 +34,8 @@ def _keep_indices(names: list[str]) -> list[int]:
 class SliderDroppedDataset(LeRobotDataset):
     """A :class:`LeRobotDataset` with the ``slider.vel`` column removed.
 
-    Slices ``observation.state`` and ``action`` — in the returned samples, in
-    ``meta.features`` (shape + names), and in ``meta.stats`` — down to the six
-    arm dims, so the whole training stack (feature derivation, quantile
-    normalization, the flow-matching loss) sees a 6-DOF arm and nothing else.
+    Slices ``observation.state`` and ``action`` down to the six arm dims in the
+    returned samples, ``meta.features``, and ``meta.stats``.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -80,9 +58,9 @@ class SliderDroppedDataset(LeRobotDataset):
         stats = self.meta.stats.get(key) if self.meta.stats else None
         if not stats:
             return
-        # Stats may be torch tensors or numpy arrays depending on the dataset;
-        # fancy-indexing the last axis works for both. Only touch per-dimension
-        # stats (last axis == the feature dim), never scalars like "count".
+        # Stats may be torch tensors or numpy arrays; fancy-indexing the last
+        # axis works for both. Only touch per-dimension stats (last axis == the
+        # feature dim), never scalars like "count".
         for stat_name, value in list(stats.items()):
             if getattr(value, "ndim", 0) >= 1 and getattr(value, "shape", (None,))[-1] == orig_dim:
                 stats[stat_name] = value[..., keep]

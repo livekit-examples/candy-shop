@@ -1,12 +1,4 @@
-"""Shared scaffolding for the robot runtime and every operator.
-
-env loading, LiveKit token minting, and an async fps pacer — the plumbing every
-entry script (`robot/run.py`, `operators/<name>/run.py`) needs and must not
-re-implement.
-
-Installed as the `utilities` package of the single root uv project, so
-scripts import `from utilities.common import ...` directly.
-"""
+"""Shared scaffolding for the robot runtime and operators: env loading, LiveKit token minting, async fps pacer."""
 from __future__ import annotations
 
 import asyncio
@@ -24,10 +16,8 @@ from livekit.protocol.room import RoomConfiguration
 def load_env(search_from: Optional[pathlib.Path] = None) -> None:
     """Load `.env` walking up from `search_from` to the filesystem root (plus cwd).
 
-    Nearest `.env` wins (loaded first, `override=False`), so the single
-    repo-root `.env` is found from any operator dir while an operator-local
-    `.env` can still override shared keys. `.env.local` always overrides. Pass
-    the calling script's directory (`Path(__file__).parent`).
+    Nearest `.env` wins (loaded first, `override=False`); `.env.local` always
+    overrides. Pass the calling script's directory (`Path(__file__).parent`).
     """
     start = (search_from or pathlib.Path.cwd()).resolve()
     seen: set[pathlib.Path] = set()
@@ -94,13 +84,10 @@ def mint_token(identity: str, room: str, ttl_hours: int = 6) -> str:
 
 
 async def pace(fps: int) -> AsyncIterator[int]:
-    """Async tick generator at `fps`. Yields the index, then awaits.
+    """Async tick generator at `fps`; yields the index, then awaits. Use as `async for tick in pace(30): ...`.
 
     Async (not `time.sleep`) so Portal callbacks scheduled via
-    `call_soon_threadsafe` actually run between ticks. Drift is corrected by
-    snapping `next_tick` forward when the loop is over budget.
-
-    Use as `async for tick in pace(30): ...`.
+    `call_soon_threadsafe` run between ticks.
     """
     interval = 1.0 / fps
     next_tick = time.perf_counter()

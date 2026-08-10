@@ -53,14 +53,11 @@ class CandyShopAssistant(Agent):
                 """
         )
 
-        # For vision
         self.latest_frame = None
         self.video_stream = None
         self._frame_task = None
 
     async def on_enter(self):
-
-        # Set up the video stream and the look tool
         self.room = get_job_context().room
 
         @self.room.on("track_subscribed")
@@ -81,7 +78,6 @@ class CandyShopAssistant(Agent):
         Args:
             candy_name: The candy the user asked for, e.g. "KitKat" or "lollipop".
         """
-        # Delegate the physical routine to a task and await its typed result.
         succeeded = await GiveCandy(
             room=self.room,
             candy_name=candy_name,

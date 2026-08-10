@@ -1,16 +1,10 @@
 """Rebindable key bindings, shared by the window and the terminal.
 
-Recording is a foot-pedal job — your hands are on the leader arm — and a pedal
-sends whatever key its vendor chose (`'`, an F-key, a media key), which you
-cannot rename. So bindings are data, not literals.
-
-Three layers, per action, most specific first: `TELEOPERATOR_KEYS_<ACTION>` in the
-env, then the JSON file the window's binding editor writes, then the defaults
-below. Per-action, so setting one env var doesn't silently clear the others.
-
-Keys are stored by **ImGui enum member name** (`apostrophe`, `f13`, `space`) —
-stable across versions and platforms, unlike `imgui.get_key_name()`, which the
-upstream docs mark debug-only and explicitly not for persistence.
+Recording is a foot-pedal job, and a pedal sends whatever key its vendor chose,
+so bindings are data. Three layers per action, most specific first:
+`TELEOPERATOR_KEYS_<ACTION>` env var, the window's JSON file, then the defaults
+below. Keys are stored by ImGui enum member name (`apostrophe`, `f13`) — stable
+across versions/platforms, unlike the debug-only `imgui.get_key_name()`.
 """
 from __future__ import annotations
 
@@ -35,10 +29,9 @@ DEFAULTS: dict[str, tuple[str, ...]] = {
     "release": (),
 }
 
-# ImGui key name -> the character that key produces on a terminal, so the
-# recorder's stdin hotkeys honour the same bindings. Keys with no single-byte
-# representation (F-keys, arrows — they arrive as escape sequences) are simply
-# absent: they work in the window and are ignored in the terminal.
+# ImGui key name -> the character it produces on a terminal, so stdin hotkeys
+# honour the same bindings. Keys with no single-byte form (F-keys, arrows) are
+# absent: they work in the window, ignored in the terminal.
 TERMINAL_CHARS: dict[str, str] = {
     **{c: c for c in "abcdefghijklmnopqrstuvwxyz"},
     **{f"_{d}": d for d in "0123456789"},
@@ -55,7 +48,7 @@ def config_path() -> Path:
 
 def load() -> dict[str, list[str]]:
     """The effective bindings. Never raises — a corrupt file logs and is ignored,
-    because losing your bindings must not stop you recording."""
+    so losing your bindings can't stop you recording."""
     bindings = {action: list(keys) for action, keys in DEFAULTS.items()}
 
     path = config_path()

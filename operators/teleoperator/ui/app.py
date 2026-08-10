@@ -1,11 +1,7 @@
 """The review UI: watch the cameras, run the session, curate the corpus.
 
-A separate OS process from the teleoperator. It holds no dataset and opens no
-hardware — it reads a status snapshot over RPC and posts commands back (see
-``client``), so closing or crashing it leaves recording untouched.
-
-Flat layout rather than a dockspace: a single-purpose tool is one less thing to
-arrange every time you sit down.
+A separate process from the teleoperator; it reads a status snapshot over RPC and
+posts commands back, so closing or crashing it leaves recording untouched.
 """
 from __future__ import annotations
 
@@ -37,8 +33,7 @@ METRICS_HEIGHT_FRACTION = 0.34
 
 
 class AppState:
-    """Everything that has to survive between frames — ImGui redraws from
-    scratch, so in-progress intent lives out here or evaporates on repaint."""
+    """Everything that has to survive between frames — ImGui redraws from scratch."""
 
     def __init__(self, client: RecorderClient, cameras: tuple[str, ...]) -> None:
         self.client = client
@@ -55,7 +50,7 @@ class AppState:
         self.setup_asked = False
         self.setup_port = ""
         self.setup_new = False            # False = continue a listed corpus
-        self.setup_pick = 0               # which listed corpus
+        self.setup_pick = 0
         self.setup_repo_id = ""
         self.setup_local = False          # new corpus under ./data instead of lerobot's home
         self.setup_task = ""
@@ -66,16 +61,14 @@ class AppState:
         self.binding: Optional[str] = None           # action awaiting a keypress
 
     def sync(self, status: dict[str, Any]) -> None:
-        """Drop index-keyed intent when the corpus changes under us: episode 4
-        after a delete is not the episode 4 you were editing."""
+        """Drop index-keyed intent when the corpus changes: a delete reassigns episode
+        indices, so episode 4 is no longer the one you were editing or viewing."""
         revision = int(status.get("revision", -1))
         if revision != self.last_revision:
             self.last_revision = revision
             self.label_drafts.clear()
             self.selected.clear()
             self.confirm_delete = False
-            # Episode indices are reassigned by a delete, so whatever was open is
-            # no longer the episode you were looking at.
             self.viewing = None
             self.player.close()
 
@@ -83,16 +76,15 @@ class AppState:
 # --- small widgets ----------------------------------------------------------
 
 def text(color, value: str) -> None:
-    """Coloured text, never format-interpreted — ImGui's `text_colored` takes a
-    printf format, so a task label containing `%` would render garbage."""
+    """Coloured text, never format-interpreted: ImGui's `text_colored` takes a printf
+    format, so a task label containing `%` would render garbage."""
     imgui.push_style_color(imgui.Col_.text, color)
     imgui.text_unformatted(value)
     imgui.pop_style_color()
 
 
 def heading(label: str, action: str = "") -> bool:
-    """Section label, optionally with a right-aligned small button on the same
-    line. Returns whether that button was clicked."""
+    """Section label, optionally with a right-aligned button. Returns whether it was clicked."""
     width = imgui.get_content_region_avail().x
     with font(theme.FONTS.small):
         text(theme.FG4, label.upper())
@@ -105,11 +97,7 @@ def heading(label: str, action: str = "") -> bool:
 
 
 def field(label: str, value: str, color=theme.FG1, *, width: float = LABEL_WIDTH) -> None:
-    """A label/value pair on a fixed grid.
-
-    Every label starts at the left edge and every value at the same offset, so a
-    column of these lines up regardless of label length — the alignment carries
-    the structure instead of ad-hoc spacers."""
+    """A label/value pair on a fixed grid, so a column of these lines up regardless of label length."""
     with font(theme.FONTS.small):
         text(theme.FG4, label.upper())
     imgui.same_line(width)
@@ -133,11 +121,7 @@ def _first_key(state: AppState, action: str) -> str:
 
 
 def button_with_key(label: str, key: str, size: ImVec2, kind: str = "plain") -> bool:
-    """A button whose shortcut hint is dimmed.
-
-    ImGui has no rich text, so the hint is drawn over the button afterwards in a
-    muted colour — it's reference material, and at full contrast it competed with
-    the label for attention."""
+    """A button with a dimmed shortcut hint drawn over it (ImGui has no rich text)."""
     pos = imgui.get_cursor_screen_pos()
     width = size.x if size.x > 0 else imgui.get_content_region_avail().x
     if width < 0:
@@ -156,7 +140,7 @@ def button_with_key(label: str, key: str, size: ImVec2, kind: str = "plain") -> 
 
 
 def accent_button(label: str, size: ImVec2 = ImVec2(0, 0)) -> bool:
-    """The one loud button on screen, so nothing competes with it."""
+    """The one loud button on screen."""
     imgui.push_style_color(imgui.Col_.button, theme.ACCENT2)
     imgui.push_style_color(imgui.Col_.button_hovered, theme.ACCENT1)
     imgui.push_style_color(imgui.Col_.button_active, theme.ACCENT1)
@@ -179,9 +163,6 @@ def danger_button(label: str, size: ImVec2 = ImVec2(0, 0)) -> bool:
 # --- regions ----------------------------------------------------------------
 
 def draw_header(state: AppState) -> None:
-    """No title — the window bar already says what this is, and the row is worth
-    more as data. Laid out as a table so the columns align across both rows
-    instead of drifting with the length of whatever identity is connected."""
     client, status = state.client, state.client.status
 
     connection = client.connection
@@ -197,17 +178,16 @@ def draw_header(state: AppState) -> None:
     obs_fps = status.get("obs_fps")
     rate = f"{status.get('fps', '?')} fps"
     if obs_fps is not None:
-        # The measured rate beside the nominal one: a gap between them is the
-        # first symptom of nearly every recording problem.
+        # Measured rate beside nominal: a gap is the first symptom of most recording problems.
         rate += f" / obs {obs_fps}"
 
     columns = (
         ("teleoperator", link, link_colour),
         ("rate", rate if status else "--", theme.FG1 if status else theme.FG4),
     )
-    # Stretch, but over a bounded width: stretching across the whole window parks
-    # the second cell mid-screen, and `sizing_fixed_fit` collapses these cells to
-    # their label (they're drawn with same_line, so the table can't measure them).
+    # Stretch over a bounded width: `sizing_fixed_fit` collapses these cells (drawn
+    # with same_line, so the table can't measure them) and full-window stretch parks
+    # the second cell mid-screen.
     if imgui.begin_table("##meta", len(columns), imgui.TableFlags_.sizing_stretch_same,
                          ImVec2(HEADER_WIDTH, 0.0)):
         for label, value, colour in columns:
@@ -219,9 +199,8 @@ def draw_header(state: AppState) -> None:
         with font(theme.FONTS.mono_small):
             text(theme.FG4, f"{status.get('repo_id', '?')}   {status.get('root', '?')}")
 
-    # Top-right, away from anything you press during a take. new_line() closes the
-    # row explicitly: leaving the cursor mid-line here put the tab bar off the
-    # right edge, where it drew nothing at all.
+    # new_line() closes the row explicitly: a cursor left mid-line put the tab bar
+    # off the right edge where it drew nothing.
     imgui.same_line(max(imgui.get_content_region_avail().x - 96.0, 0.0))
     if imgui.button("settings"):
         imgui.open_popup("Settings")
@@ -267,7 +246,7 @@ def draw_cameras(state: AppState, size: ImVec2) -> None:
         imgui.end_child()
         return
 
-    # Two-up at typical 640x480 fills the pane without thumbnailing either feed.
+    # Two-up at typical 640x480 fills the pane without thumbnailing.
     columns = 1 if len(cameras) == 1 else 2
     rows = (len(cameras) + columns - 1) // columns
     spacing = imgui.get_style().item_spacing
@@ -283,8 +262,8 @@ def draw_cameras(state: AppState, size: ImVec2) -> None:
         with font(theme.FONTS.mono_small):
             text(theme.FG3, camera)
         latest = state.client.frame(camera)
-        # Letterbox, so a feed is never distorted. A camera with no frame yet is
-        # sized 4:3 so the panel doesn't jump when the track connects.
+        # Letterbox to avoid distortion; a frameless camera is sized 4:3 so the panel
+        # doesn't jump when the track connects.
         src_h, src_w = latest[1].shape[:2] if latest is not None else (3, 4)
         width = min(cell_w, cell_h * src_w / src_h)
         height = width * src_h / src_w
@@ -378,8 +357,6 @@ def draw_session(state: AppState, size: ImVec2) -> None:
     dropped = int(status.get("dropped", 0))
     if dropped:
         causes = status.get("drop_causes") or {}
-        # Name the cause. "dropped" alone sent me chasing a timeout when the real
-        # answer was add_frame raising on every row.
         worst = max(causes, key=lambda k: causes[k], default="")
         why = {
             "error": "add_frame failing — schema/disk, not timing",
@@ -387,8 +364,7 @@ def draw_session(state: AppState, size: ImVec2) -> None:
             "stale": f"obs too old to pair ({status.get('obs_fps', 0)}/s)",
             "backlog": "writer can't keep up — disk or encoder bound",
         }.get(worst, "")
-        # Wrapped: these run longer than the sidebar and ImGui doesn't wrap text
-        # by default, so the useful half would be clipped off the right edge.
+        # Wrapped: these run longer than the sidebar and ImGui doesn't wrap by default.
         imgui.push_text_wrap_pos(0.0)
         with font(theme.FONTS.small):
             text(theme.SERIOUS if not int(status.get("rows", 0)) else theme.MODERATE,
@@ -400,7 +376,6 @@ def draw_session(state: AppState, size: ImVec2) -> None:
     imgui.separator()
     imgui.spacing()
 
-    # Explained on hover, not in standing body copy that crowds the panel.
     heading("arm control")
     claim_key = _first_key(state, "claim")
     active = status.get("active_operator")
@@ -425,16 +400,12 @@ def draw_session(state: AppState, size: ImVec2) -> None:
 
 
 def metric(label: str, value: str, color=theme.FG1) -> None:
-    """A metrics field. Its own column width: these labels ("observations",
-    "action jitter") are longer than the sidebar's and would collide with the
-    values on the narrower grid."""
+    """A metrics field on a wider grid; these labels are longer than the sidebar's."""
     field(label, value, color, width=METRIC_LABEL_WIDTH)
 
 
 def draw_metrics(state: AppState, size: ImVec2) -> None:
-    """Portal's own counters. These answer the questions a session actually
-    raises — is the link slow, is a track holding up the sync, is anything being
-    evicted — none of which the teleoperator can infer by itself."""
+    """Portal's own counters: link speed, sync blockers, evictions."""
     metrics = state.client.metrics
     imgui.begin_child("##metrics", size, imgui.ChildFlags_.borders)
     heading("metrics")
@@ -466,8 +437,8 @@ def draw_metrics(state: AppState, size: ImVec2) -> None:
         imgui.spacing()
         metric("observations", str(sync.get("observations", 0)))
         stale = int(sync.get("stale_reused", 0) or 0)
-        # Non-zero is not a fault — it is reuse_stale_frames doing its job — but a
-        # large share means frames are missing their state window.
+        # Non-zero isn't a fault (reuse_stale_frames at work), but a large share means
+        # frames are missing their state window.
         metric("stale reused", str(stale), theme.MODERATE if stale else theme.FG1)
         metric("match p50", ms(sync.get("match_p50_ms")))
         metric("match p95", ms(sync.get("match_p95_ms")))
@@ -541,8 +512,6 @@ def draw_corpus(state: AppState, size: ImVec2) -> None:
     imgui.begin_child("##corpus", size, imgui.ChildFlags_.borders)
 
     heading(f"episodes  ({len(episodes)})")
-    # No same_line here: `heading` has already advanced the line, so continuing it
-    # only indents this row away from the table's left edge.
     pending = {
         i: text for i, text in state.label_drafts.items()
         if text.strip() and text != _task_of(episodes, i)
@@ -636,8 +605,8 @@ def _draw_episode_table(state: AppState, episodes: list[dict], busy: bool) -> No
         if imgui.small_button("shown" if viewing else "view"):
             state.viewing = index
             state.player.close()
-            # The offsets come from the teleoperator, not from disk: mid-session the
-            # episode metadata on disk has no parquet footer to read.
+            # Offsets come from the teleoperator, not disk: mid-session the metadata
+            # parquet has no footer to read.
             state.client.request_episode_video(index)
         if viewing:
             imgui.pop_style_color(2)
@@ -655,8 +624,7 @@ def _draw_episode_table(state: AppState, episodes: list[dict], busy: bool) -> No
         else:
             state.label_drafts.pop(index, None)
         if submitted and draft.strip() and draft != str(episode.get("task", "")):
-            # Enter applies just this row: fixing one mislabelled episode is the
-            # common case, and shouldn't need the batch button.
+            # Enter applies just this row, bypassing the batch button.
             state.client.call(protocol.METHOD_RELABEL, {"episodes": {str(index): draft}})
 
         imgui.pop_id()
@@ -696,10 +664,7 @@ def _draw_delete_modal(state: AppState) -> None:
 
 
 def draw_settings(state: AppState) -> None:
-    """Settings, which for now is the key bindings.
-
-    Rebind by *pressing the key*, not by picking from a list: a foot pedal sends
-    whatever key its vendor chose and you have no way to know which."""
+    """Key bindings. Rebind by *pressing the key*: a foot pedal sends whatever key its vendor chose."""
     if not imgui.begin_popup_modal(
         "Settings", None, imgui.WindowFlags_.always_auto_resize
     )[0]:
@@ -725,8 +690,7 @@ def draw_settings(state: AppState) -> None:
         imgui.table_next_row()
         imgui.push_id(action)
         if captured and state.binding == action:
-            # Append rather than replace, so a pedal can sit alongside the
-            # keyboard binding instead of evicting it.
+            # Append, not replace, so a pedal can sit alongside the keyboard binding.
             if captured not in state.keys[action]:
                 state.keys[action].append(captured)
             state.binding = None
@@ -769,8 +733,8 @@ def draw_settings(state: AppState) -> None:
     imgui.end_popup()
 
 
-# Never bindable: modifiers carry no keypress of their own, Escape cancels, and
-# Enter/mouse buttons are how you work the dialog itself.
+# Never bindable: modifiers carry no keypress of their own, and Escape/Enter/mouse
+# are how you work the dialog itself.
 _UNBINDABLE = frozenset({
     "escape", "enter", "keypad_enter", "left_ctrl", "right_ctrl", "left_shift",
     "right_shift", "left_alt", "right_alt", "left_super", "right_super",
@@ -782,10 +746,8 @@ _UNBINDABLE = frozenset({
 
 
 def _captured_key() -> Optional[str]:
-    """The name of whatever key was pressed this frame, or None.
-
-    Scans the named-key range rather than a hardcoded list, so an unusual pedal
-    (F13-F24, a media key) binds like anything else. Escape cancels."""
+    """Name of whatever key was pressed this frame, or None. Scans the named-key range
+    so an unusual pedal (F13-F24, a media key) binds like anything else."""
     if imgui.is_key_pressed(imgui.Key.escape, False):
         return None
     for name in dir(imgui.Key):
@@ -808,16 +770,11 @@ def draw(state: AppState) -> None:
     draw_header(state)
     draw_banner(state)
 
-    # Nothing to record with until a port and a corpus are chosen. The teleoperator
-    # joins the room first and waits, so this replaces the whole workspace rather
-    # than blocking the terminal before the window even exists.
+    # Nothing to record with until a port and corpus are chosen.
     if status and not status.get("configured"):
         draw_setup(state)
         return
 
-    # Two views, because the two jobs don't overlap in time: you record with your
-    # hands on the leader arm and curate afterwards. Splitting them gives the
-    # cameras and the episode table the full width each needs.
     draw_view_switch(state)
     if state.tab == "Teleop":
         draw_teleop_tab(state)
@@ -828,10 +785,7 @@ def draw(state: AppState) -> None:
 
 
 def draw_setup(state: AppState) -> None:
-    """Choose the leader port and the corpus, in the window.
-
-    The teleoperator enumerates both — it owns the serial bus and the disk — so this
-    only picks from what it reports and hands the answer back."""
+    """Choose the leader port and corpus. The teleoperator enumerates both; this picks from what it reports."""
     client, status = state.client, state.client.status
     options = client.setup_options
     if not state.setup_asked:
@@ -846,8 +800,6 @@ def draw_setup(state: AppState) -> None:
     if opening:
         text(theme.ACCENT1, f"{opening} ...")
         with font(theme.FONTS.small):
-            # Calibration is lerobot's and it reads from the teleoperator's terminal,
-            # which this window cannot show or answer.
             text(theme.FG4, "If this hangs, check the teleoperator's terminal — lerobot "
                             "may be asking you to calibrate the leader arm.")
         imgui.end_child()
@@ -868,8 +820,7 @@ def draw_setup(state: AppState) -> None:
     ports = options.get("ports") or []
     datasets = options.get("datasets") or []
     if not state.setup_port:
-        # Only a port that looks like an arm gets preselected; otherwise the field
-        # stays empty and Open stays disabled until you actually choose.
+        # Only a likely-arm port is preselected; otherwise Open stays disabled until you choose.
         state.setup_port = str(defaults.get("port") or "")
     if not state.setup_repo_id:
         state.setup_repo_id = str(defaults.get("repo_id") or "")
@@ -948,8 +899,7 @@ def draw_setup(state: AppState) -> None:
 
 
 def session_valid(repo_id: str) -> bool:
-    """`org/name`, matching the teleoperator's own check so the button doesn't offer
-    something the RPC will refuse."""
+    """`org/name`, matching the teleoperator's own check so Open can't offer what the RPC will refuse."""
     return repo_id.count("/") == 1 and all(p.strip() for p in repo_id.split("/"))
 
 
@@ -963,11 +913,7 @@ def _setup_target(state: AppState, datasets: list, defaults: dict) -> tuple[str,
 
 
 def draw_view_switch(state: AppState) -> None:
-    """A segmented control, not ImGui's tab bar.
-
-    The tab bar collapsed to a 2 px sliver under this style — reproducible in
-    isolation, and not from the colours, since garish ones showed the same sliver.
-    A two-way switch needs none of its machinery, and here the geometry is ours."""
+    """A segmented control, not ImGui's tab bar (which collapsed to a 2 px sliver under this style)."""
     for name in ("Teleop", "Dataset"):
         selected = state.tab == name
         imgui.push_style_color(imgui.Col_.button,
@@ -1005,10 +951,7 @@ def draw_dataset_tab(state: AppState) -> None:
 
 
 def draw_player(state: AppState, size: ImVec2) -> None:
-    """Play back one episode, both cameras on a single scrub.
-
-    The cursor is shared rather than per-camera: both tracks span the same moment
-    of the episode, so one position is the whole truth and they cannot drift."""
+    """Play back one episode, both cameras on a single shared scrub so they can't drift."""
     client, player = state.client, state.player
     imgui.begin_child("##player", size, imgui.ChildFlags_.borders)
 
@@ -1018,8 +961,8 @@ def draw_player(state: AppState, size: ImVec2) -> None:
         imgui.end_child()
         return
 
-    # The teleoperator answers `request_episode_video` asynchronously; open once the
-    # reply for the episode we're actually looking at arrives.
+    # `request_episode_video` is answered asynchronously; open once the reply for the
+    # episode we're actually looking at arrives.
     info = client.episode_video
     if player.episode != state.viewing and info.get("episode") == state.viewing:
         root = pathlib.Path(str(client.status.get("root") or ""))
@@ -1116,11 +1059,8 @@ def key_pressed(state: AppState, action: str) -> bool:
 
 
 def handle_shortcuts(state: AppState) -> None:
-    """Keyboard control, over the rebindable bindings in ``shortcuts``.
-
-    Ignored while a text field has the keyboard — otherwise typing a task with a
-    space or an `r` in it would start and stop episodes — and while a corpus job
-    holds the dataset."""
+    """Keyboard control. Ignored while a text field has the keyboard (else typing a task
+    would start/stop episodes) and while a corpus job holds the dataset."""
     if imgui.get_io().want_capture_keyboard or state.binding is not None:
         return
     status = state.client.status
@@ -1134,8 +1074,7 @@ def handle_shortcuts(state: AppState) -> None:
         elif status.get("ready") and not status.get("saving"):
             state.client.call(protocol.METHOD_START)
     elif key_pressed(state, "discard"):
-        # No confirmation: you hit this because the take was bad, and a dialog
-        # would defeat the point.
+        # No confirmation: a dialog would defeat the point.
         if recording:
             state.client.call(protocol.METHOD_DISCARD)
     elif key_pressed(state, "claim"):
@@ -1157,9 +1096,8 @@ def cli() -> None:
     room = env("LIVEKIT_ROOM", "candy-shop")
     identity = env("TELEOPERATOR_UI_IDENTITY", "teleoperator-ui")
 
-    # Same wire contract the teleoperator loads, so video renders before a teleoperator
-    # is even found — read as YAML, never through livekit.portal (see
-    # contract_camera_names for why that matters in this process).
+    # Same wire contract the teleoperator loads, so video renders before one is found.
+    # Read as YAML, never through livekit.portal (see contract_camera_names for why).
     cameras = contract_camera_names(portal_config_path(PACKAGE_DIR))
 
     client = RecorderClient(
@@ -1179,8 +1117,7 @@ def cli() -> None:
     params.app_window_params.window_title = "LiveKit — Candy Shop Teleoperator"
     params.app_window_params.window_geometry.size = (1500, 940)
     params.app_window_params.restore_previous_geometry = True
-    # Per-user machine state, not project state. HelloImGui would otherwise write
-    # its ini wherever you launched from and litter the repo.
+    # Per-user machine state; otherwise HelloImGui litters the repo with its ini.
     params.ini_folder_type = hello_imgui.IniFolderType.app_user_config_folder
     params.ini_filename = "candy-shop-teleoperator/ui.ini"
     params.imgui_window_params.show_menu_bar = False
@@ -1198,8 +1135,8 @@ def cli() -> None:
     try:
         hello_imgui.run(params)
     except KeyboardInterrupt:
-        # Under `teleoperator --ui` Ctrl-C reaches this process too; don't print a
-        # traceback over the teleoperator's shutdown output.
+        # Under `teleoperator --ui`, Ctrl-C reaches this process too; swallow it so we
+        # don't print a traceback over the teleoperator's shutdown output.
         pass
     finally:
         client.stop()

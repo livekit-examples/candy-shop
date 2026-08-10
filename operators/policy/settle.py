@@ -1,15 +1,9 @@
 """Settle gate: wait for the arm to reach the last commanded pose.
 
-MolmoAct2 predicts an action chunk from a single observation. If we keep
-feeding it observations while the arm is still travelling toward the previous
-target, it infers on a smeared, mid-motion state. The settle gate closes that
-loop: before each inference the picker waits — sending nothing, so the robot
-keeps driving toward the last action — until the observed arm is within
-``tolerance`` of that command, or ``timeout_s`` elapses.
-
-The gate is state-agnostic: it holds no observation stream of its own. The
-caller records each command it sends and hands the gate a getter for the latest
-observed state; the gate only compares the two.
+MolmoAct2 infers on a single observation, so it should see a stationary arm. The
+gate blocks until the observed arm is within ``tolerance`` of the last command
+(or ``timeout_s`` elapses), sending nothing meanwhile so the robot keeps driving
+toward that command.
 """
 from __future__ import annotations
 
@@ -27,7 +21,7 @@ class SettleGate:
 
     def __init__(self, *, keys: tuple[str, ...], tolerance: float, timeout_s: float, fps: int) -> None:
         self._keys = keys
-        self._tolerance = tolerance  # max per-joint error to call it "reached"
+        self._tolerance = tolerance  # max per-joint error to call it "reached"; <=0 disables
         self._timeout_s = timeout_s
         self._fps = fps
         self._last: dict[str, float] | None = None
@@ -62,7 +56,7 @@ class SettleGate:
         an optional event with ``.is_set()`` to bail out early.
         """
         if self._last is None or not self.enabled:
-            return  # nothing commanded yet, or the gate is disabled
+            return
         deadline = time.monotonic() + self._timeout_s
         async for _ in pace(self._fps):
             if stop is not None and stop.is_set():

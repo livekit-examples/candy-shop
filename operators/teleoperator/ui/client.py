@@ -1,16 +1,12 @@
-"""The UI's half of the two-process split: a room viewer + an RPC client.
+"""Room viewer + RPC client, on a background asyncio thread.
 
-Runs on a background thread with its own asyncio loop. The ImGui thread never
-awaits — it reads snapshots (``status``, ``episodes``, ``frame``) and posts
-commands (``call``), so a stalled RPC shows stale numbers rather than freezing
-the window.
+The ImGui thread never awaits: it reads snapshots (``status``, ``episodes``,
+``frame``) and posts commands (``call``), so a stalled RPC shows stale numbers
+rather than freezing the window.
 
-**A plain LiveKit participant, not a Portal peer.** Portal has only robot and
-operator roles, and joining as an operator would put a viewer in the room's
-operator list — where a `c` ring would happily cycle control onto a window that
-sends no actions, idling the arm. The cameras are ordinary WebRTC h264 tracks
-(which is why `portal.yaml` picks h264), so a plain participant subscribes just
-as the browser console does, and RPC is available to any participant.
+Joins as a plain LiveKit participant, not a Portal peer: joining as an operator
+would land a viewer in the room's operator list, where a `c` ring could cycle arm
+control onto a window that sends no actions.
 """
 from __future__ import annotations
 
@@ -58,9 +54,8 @@ class RecorderClient:
         self._room: Optional[rtc.Room] = None
         self._stop = threading.Event()
 
-        # --- state the ImGui thread reads ----------------------------------
-        # Replaced by whole assignment, never mutated in place, so a reader sees
-        # a self-consistent value without a lock.
+        # State the ImGui thread reads: replaced by whole assignment, never mutated
+        # in place, so a reader sees a self-consistent value without a lock.
         self._status: dict[str, Any] = {}
         self._metrics: dict[str, Any] = {}
         self._episode_video: dict[str, Any] = {}
@@ -110,8 +105,7 @@ class RecorderClient:
 
     @property
     def metrics(self) -> dict[str, Any]:
-        """Portal's counters. Polled slower than status; `{}` until the first
-        reply lands."""
+        """Portal's counters. `{}` until the first reply lands."""
         return self._metrics
 
     @property
@@ -133,13 +127,11 @@ class RecorderClient:
 
     @property
     def episode_video(self) -> dict[str, Any]:
-        """Reply to the last `request_episode_video`; `{}` until one lands. Carries
-        its own `episode` index, so a stale reply is easy to ignore."""
+        """Reply to the last `request_episode_video`; carries its own `episode` index so a stale reply is easy to ignore."""
         return self._episode_video
 
     def request_episode_video(self, index: int) -> None:
-        """Ask where an episode's footage lives. Fire-and-forget, like every other
-        command; the answer shows up in `episode_video`."""
+        """Ask where an episode's footage lives. Fire-and-forget; the answer shows up in `episode_video`."""
         loop = self._loop
         if loop is None or self._target is None:
             return
@@ -182,9 +174,7 @@ class RecorderClient:
     # --- commands (ImGui thread) ---------------------------------------------
 
     def call(self, method: str, payload: Optional[dict] = None) -> None:
-        """Fire an RPC without waiting; a refusal lands in `notice`, state changes
-        show up in the next poll. Every method either completes in microseconds or
-        is a job the teleoperator tracks itself, so nothing wants a blocking wait."""
+        """Fire an RPC without waiting; a refusal lands in `notice`, state changes show up in the next poll."""
         loop = self._loop
         if loop is None or self._target is None:
             self._notice = "not connected to a teleoperator"
@@ -265,8 +255,7 @@ class RecorderClient:
     async def _poll_forever(self) -> None:
         last_revision = -1
         tick = 0
-        # Metrics are counters, not state — a slower cadence is plenty, and it
-        # keeps the status poll (which drives the whole UI) cheap.
+        # Metrics are counters, not state — a slower cadence keeps the status poll cheap.
         metrics_every = max(int(1.0 / self._poll_interval), 1)
         while not self._stop.is_set():
             if self._target is not None:
@@ -279,8 +268,8 @@ class RecorderClient:
                 if status is not None:
                     status.pop("ok", None)
                     self._status = status
-                    # Only when the teleoperator says it changed — else a 4 Hz poll
-                    # would drag the whole corpus over the wire 4x a second.
+                    # Refetch only when revision changes, else a 4 Hz poll drags the
+                    # whole corpus over the wire 4x a second.
                     revision = int(status.get("revision", 0))
                     if revision != last_revision:
                         if await self._refetch_episodes(int(status.get("episodes", 0))):
@@ -325,8 +314,7 @@ class RecorderClient:
             task.cancel()
 
     async def _pump_video(self, camera: str, track) -> None:
-        """Decode one camera into a latest-wins slot — not a queue: the renderer
-        draws at display rate and only ever wants the newest frame."""
+        """Decode one camera into a latest-wins slot: the renderer only ever wants the newest frame."""
         stream = rtc.VideoStream(track)
         try:
             async for event in stream:

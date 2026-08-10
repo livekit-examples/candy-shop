@@ -1,20 +1,10 @@
-"""Fine-tune MolmoAct2 on a candy-shop dataset.
-
-Minimal single-GPU fine-tuning loop built on lerobot's own policy/processor
-factories. Point it at a LeRobot dataset recorded on the leslider rig and it
-produces a MolmoAct2 checkpoint under ``--output`` that ``run.py`` can serve.
+"""Fine-tune MolmoAct2 on a candy-shop dataset (single GPU).
 
 The dataset's 7th field (``slider.vel``) is dropped end to end — see
-``operators/policy/molmoact.py``. MolmoAct2's SO-101 checkpoint is a six-DOF
-arm; the slider is driven separately by the ``move_to`` operator.
-
-Usage::
+``operators/policy/molmoact.py``.
 
     uv run policy-train --dataset <user>/candy_shop --dataset-root data/candy_shop
-    # fine-tunes from the default SO-101 checkpoint; writes outputs/molmoact2-candy
-
-Fewer-VRAM knobs (see the MolmoAct2 docs for the memory table):
-``--train-action-expert-only`` (cheapest), ``--lora``, ``--gradient-checkpointing``.
+    # writes outputs/molmoact2-candy; VRAM knobs: --train-action-expert-only, --lora, --gradient-checkpointing
 """
 from __future__ import annotations
 
@@ -46,15 +36,14 @@ def _build_config(checkpoint: str, device: str, args: argparse.Namespace, image_
         config = PreTrainedConfig.from_pretrained(checkpoint)
         if not isinstance(config, MolmoAct2Config):
             raise TypeError(f"{checkpoint} is a {type(config).__name__}, not MolmoAct2.")
-        config.pretrained_path = checkpoint  # load the LeRobot weights on top
+        config.pretrained_path = checkpoint
         logger.info("Fine-tuning from LeRobot checkpoint %s", checkpoint)
     except Exception:
         config = MolmoAct2Config(checkpoint_path=checkpoint)
         logger.info("Fine-tuning from original MolmoAct2 HF weights %s", checkpoint)
 
-    # Clear any features carried in from the checkpoint's config so make_policy
-    # re-derives them from *our* (slider-dropped) dataset — otherwise the old
-    # camera keys and 7-dim state would stick.
+    # Clear inherited features so make_policy re-derives them from our
+    # (slider-dropped) dataset; otherwise the old camera keys and 7-dim state stick.
     config.input_features = {}
     config.output_features = {}
 
@@ -117,8 +106,8 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     load_env(pathlib.Path(__file__).resolve().parent)
 
-    # Metadata first: we need fps + camera keys to build delta_timestamps and
-    # the image-key order before opening the (heavier) dataset.
+    # Metadata first: fps + camera keys build delta_timestamps and image-key
+    # order before opening the heavier dataset.
     meta = LeRobotDatasetMetadata(args.dataset, root=args.dataset_root)
     image_keys = _order_cameras(list(meta.camera_keys), args.primary_camera, args.wrist_camera)
     delta_timestamps = {ACTION: [i / meta.fps for i in range(args.chunk_size)]}
@@ -207,7 +196,7 @@ def main() -> None:
 def _save(policy, preprocessor, postprocessor, out_dir: pathlib.Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     policy.save_pretrained(out_dir)
-    # The processors carry the (sliced) normalization stats; run.py reloads them.
+    # Processors carry the (sliced) normalization stats; run.py reloads them.
     preprocessor.save_pretrained(out_dir)
     postprocessor.save_pretrained(out_dir)
     logger.info("Saved checkpoint -> %s", out_dir)

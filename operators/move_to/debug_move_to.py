@@ -54,7 +54,6 @@ logger = logging.getLogger(__name__)
 
 
 def _line(img: np.ndarray, safe_zone: SafeZone, coord_norm: float, color, label: str) -> None:
-    """Draw a bound/target line perpendicular to the travel axis."""
     h, w = img.shape[:2]
     if safe_zone.axis == "vertical":
         y = int(round(coord_norm * h))

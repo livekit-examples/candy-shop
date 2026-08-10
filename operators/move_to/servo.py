@@ -1,14 +1,4 @@
-"""Closed-loop slider servo: drive the ArUco marker onto a target line.
-
-``SliderServo`` owns the operator's action stream. Each tick it detects the
-marker, computes the pixel error to the target line along ``config.AXIS``, runs
-a PID to a ``slider.vel`` command, and sends a full action: the arm mirrored
-from the latest observation (held still) plus that slider velocity. The safe
-zone caps the request to 0..100 so the servo is never asked to leave the zone.
-
-Shared by the operator (``run.py``, one-shot ``servo_to``) and the debug tool
-(``debug_move_to.py``, its own loop reusing the primitives).
-"""
+"""Closed-loop slider servo: drive the ArUco marker onto a target line."""
 from __future__ import annotations
 
 import logging
@@ -34,11 +24,7 @@ def _now_us() -> int:
 
 @dataclass
 class PID:
-    """PID with derivative low-pass filtering and anti-windup.
-
-    Maps an image-space error (pixels) to a slider velocity (raw ticks/s).
-    Ported from the leslider ``object_follow`` example.
-    """
+    """PID with derivative low-pass and anti-windup: error (px) -> velocity (ticks/s)."""
 
     kp: float
     ki: float
@@ -135,7 +121,7 @@ class SliderServo:
         )
 
     def send(self, slider_vel: float) -> None:
-        """Send the arm (mirrored, held) + the commanded slider velocity."""
+        """Send the arm (mirrored, held) plus the commanded slider velocity."""
         action = {k: float(self._state[k]) for k in ARM_POS_KEYS}
         action[SLIDER_VEL_KEY] = float(slider_vel)
         self._op.send_action(action, timestamp_us=_now_us(), in_reply_to_ts_us=self._obs_ts_us)
@@ -156,8 +142,8 @@ class SliderServo:
     def velocity_for(
         self, target_pos: float, marker: MarkerDetection, pid: PID, dt: float
     ) -> tuple[float, float]:
-        """Returns ``(slider_vel, error_px)``. Inside the deadzone the output is
-        zero but the integrator is kept so hovering doesn't reset it."""
+        """Returns ``(slider_vel, error_px)``. Inside the deadzone output is zero
+        but the integrator is kept so hovering doesn't reset it."""
         h, w = self._frame.shape[:2]
         error_px = (
             self._safe_zone.target_coord(target_pos) - self._safe_zone.marker_coord(marker, h, w)

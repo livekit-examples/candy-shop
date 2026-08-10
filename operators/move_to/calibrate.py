@@ -83,7 +83,6 @@ async def _capture_frame(timeout_s: float = 20.0) -> tuple[np.ndarray, int, int]
 
 
 def _line(img: np.ndarray, coord_px: int, color) -> None:
-    """Draw the bound line at ``coord_px`` along ``config.AXIS``."""
     h, w = img.shape[:2]
     if config.AXIS == "vertical":
         cv2.line(img, (0, coord_px), (w, coord_px), color, 2, cv2.LINE_AA)

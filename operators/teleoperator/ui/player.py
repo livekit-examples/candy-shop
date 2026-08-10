@@ -1,18 +1,8 @@
 """Decode one episode's cameras from the corpus, for review.
 
-Episodes are concatenated into shared mp4s, so "play episode 7" means seeking to
-its second-offset inside a file and decoding forward. This reads those files
-**directly** rather than through ``LeRobotDataset``: mid-session the dataset's
-metadata parquet is footerless and pyarrow won't open it (see ``library``), while
-the mp4s decode fine even while being appended to — verified. The offsets come
-from the recorder over RPC.
-
-One frame index drives every camera. Both tracks cover the same wall-clock span
-of the episode, so a single scrub position maps to the same moment in each — no
-per-camera cursor, and no way for them to drift apart.
-
-Requires the corpus on a path this process can read. When the recorder is on
-another host, ``open`` fails and the UI says so instead of pretending.
+Reads the shared mp4s directly rather than through ``LeRobotDataset``: mid-session
+the dataset's metadata parquet is footerless and pyarrow won't open it, while the
+mp4s decode fine even while being appended to. Offsets come from the recorder over RPC.
 """
 from __future__ import annotations
 
@@ -27,9 +17,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 CACHE_FRAMES = 48
-"""Decoded frames kept per camera. Bounded because these are full-resolution RGB
-(~0.9 MB each at 640x480); 48 is a couple of seconds of scrub-back for a few tens
-of MB."""
+"""Decoded frames kept per camera. Full-resolution RGB (~0.9 MB each at 640x480)."""
 
 
 class _Track:
@@ -53,9 +41,8 @@ class _Track:
 
         self._container = av.open(str(self.path))
         self._stream = self._container.streams.video[0]
-        # Decoding is single-threaded on purpose: "auto" spawns worker threads per
-        # container, and with two tracks open that fought the UI for cores while
-        # scrubbing without decoding any faster at these resolutions.
+        # Single-threaded on purpose: "auto" spawns worker threads per container that
+        # fought the UI for cores while scrubbing without decoding any faster here.
         self._stream.thread_type = "NONE"
 
     def close(self) -> None:
@@ -84,9 +71,8 @@ class _Track:
             return None
 
     def _decode_to(self, index: int) -> Optional[np.ndarray]:
-        # Decode forward when the target is just ahead — that's the common case
-        # while playing or nudging the scrub, and a seek would throw away the
-        # decoder state we already hold. Seek only when jumping.
+        # Decode forward when the target is just ahead (the common case while playing);
+        # seeking would discard decoder state. Seek only when jumping.
         if self._next_index is None or index < self._next_index or index > self._next_index + 24:
             self._seek(index)
 
@@ -142,8 +128,7 @@ class EpisodePlayer:
         return bool(self._tracks)
 
     def open(self, root: Path, episode: int, videos: dict, frames: int) -> bool:
-        """Open `episode`'s cameras. False (with `error` set) if the corpus isn't
-        readable from here — the recorder may be on another host."""
+        """Open `episode`'s cameras. False (with `error` set) if the corpus isn't readable from here."""
         self.close()
         self.error = ""
         if not videos:
@@ -197,8 +182,7 @@ class EpisodePlayer:
         self.position = max(0, min(int(index), self.frames - 1))
 
     def advance(self, elapsed_s: float, fps: int) -> None:
-        """Move the cursor by wall-clock time. Stops at the end rather than
-        looping — a review pass wants to land on the last frame."""
+        """Move the cursor by wall-clock time. Stops at the end rather than looping."""
         if not self.playing:
             return
         step = int(elapsed_s * max(fps, 1))

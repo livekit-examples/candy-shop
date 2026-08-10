@@ -1,10 +1,7 @@
-"""Perception + geometry for the positioner.
+"""Perception + geometry for the positioner: ArUco detection and the safe zone.
 
-* ``ArucoDetector`` — finds the robot's on-board ArUco marker in the overhead
-  frame and reports its pixel center.
-* ``SafeZone`` — the two lines (along ``config.AXIS``) the slider travels
-  between. ``pos`` is 0..100 (0 = first line, 100 = second), stored as a
-  normalized coordinate along the axis. Requests are capped to ``[0, 100]``.
+``SafeZone`` ``pos`` is 0..100 (0 = first line, 100 = second) along ``config.AXIS``,
+stored normalized and capped to ``[0, 100]``.
 """
 from __future__ import annotations
 

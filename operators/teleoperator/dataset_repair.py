@@ -1,29 +1,11 @@
-"""Crash-safe repair for LeRobotDataset (v3.0) recordings.
+"""Crash-safe footer repair for LeRobotDataset (v3.0) recordings.
 
-Why this exists
----------------
-lerobot writes each episode's data/metadata as a parquet *row group* through a
-long-lived ``pyarrow.ParquetWriter`` whose **footer is only flushed at
-``finalize()``**. If the recorder dies non-gracefully — SIGKILL, OOM, power
-loss, or a native segfault (e.g. an ffmpeg/pyav dylib clash) — ``finalize()``
-never runs and *both* parquet files are left without a footer. Every byte of
-every saved episode is still on disk, but pyarrow refuses to open a footerless
-file, so the whole dataset (all episodes, not just the in-flight one) becomes
-unreadable and ``LeRobotDataset.resume`` raises
-``ArrowInvalid: Parquet magic bytes not found in footer``.
-
-The pages are intact, so the footer is mechanically reconstructable: walk the
-page headers to recover each row group's offsets/sizes, and pair them with the
-schema (which we regenerate from the dataset's own ``meta/info.json``). This
-module does exactly that, in place, backing up the corrupt file first. It runs
-automatically at resume time (see ``operators/teleoperator/recorder.py``), so a
-crash can bruise at most the un-saved in-flight episode — never a saved one.
-
-It only *rebuilds footers* over pages that are already on disk; it does not
-fabricate episodes. Pair it with ``metadata_buffer_size=1`` on the writer so
-every saved episode's metadata row is flushed to disk immediately (otherwise up
-to ``metadata_buffer_size-1`` metadata rows live only in memory and are lost on a
-hard kill, footer or no footer).
+lerobot's ``pyarrow.ParquetWriter`` only flushes the parquet footer at
+``finalize()``. A non-graceful death (SIGKILL/OOM/segfault) leaves both parquet
+files footerless and unreadable, even though every page is on disk. The pages
+are intact, so we rebuild the footer in place from the page headers plus a
+schema regenerated from ``meta/info.json``. Runs automatically at resume (see
+recorder.py). Rebuilds footers only — never fabricates episodes.
 """
 from __future__ import annotations
 
@@ -41,9 +23,8 @@ logger = logging.getLogger(__name__)
 STATKEYS = ["min", "max", "mean", "std", "count", "q01", "q10", "q50", "q90", "q99"]
 
 # ─────────────────────────── Thrift compact codec ───────────────────────────
-# Just enough of the compact protocol to parse a parquet footer as a generic
-# tree and re-serialize a tree we assemble by hand. Byte-exact round-trip is
-# covered by the repo's recovery tests.
+# Just enough of the compact protocol to parse a parquet footer and re-serialize
+# a tree we assemble by hand.
 
 CT_STOP, CT_BOOL_T, CT_BOOL_F, CT_BYTE, CT_I16, CT_I32, CT_I64 = 0, 1, 2, 3, 4, 5, 6
 CT_DOUBLE, CT_BINARY, CT_LIST, CT_SET, CT_MAP, CT_STRUCT = 7, 8, 9, 10, 11, 12
@@ -315,11 +296,9 @@ def _pa_scalar(dtype: str):
 
 
 def _data_arrow_schema(features: dict) -> pa.Schema:
-    """Parquet schema lerobot writes for the data file: the non-image/video
-    features, in declaration order. A shape-(1,) feature is stored as a scalar;
-    a multi-element feature as a variable ``list<T>`` (matching the writer, which
-    reshapes (1,) features to 1-D and lets ``datasets`` emit list<> for the rest).
-    """
+    """The data-file parquet schema lerobot writes: non-image/video features in
+    declaration order. Shape-(1,) features store as scalars, multi-element ones
+    as ``list<T>`` (matching the writer)."""
     fields = []
     for name, spec in features.items():
         if spec["dtype"] in ("image", "video", "string"):
@@ -331,10 +310,9 @@ def _data_arrow_schema(features: dict) -> pa.Schema:
 
 
 def _episodes_arrow_schema(features: dict) -> pa.Schema:
-    """Reconstruct the meta/episodes schema deterministically from features.
-    Column order mirrors lerobot: base cols, per-camera video meta, then per-
-    feature stats (numeric features first, image/video features last), then the
-    meta/episodes chunk/file indices."""
+    """The meta/episodes schema, reconstructed from features. Column order must
+    mirror lerobot: base cols, per-camera video meta, per-feature stats (numeric
+    first, image/video last), then the meta/episodes chunk/file indices."""
     video_keys = [k for k, v in features.items() if v["dtype"] in ("video", "image")]
     numeric_keys = [k for k, v in features.items() if v["dtype"] not in ("video", "image", "string")]
 
@@ -386,8 +364,8 @@ def _episodes_arrow_schema(features: dict) -> pa.Schema:
 
 
 def _footer_template(schema: pa.Schema):
-    """Write a tiny 2-row parquet with ``schema`` to harvest a consistent
-    parquet-schema thrift + per-column metadata templates."""
+    """Write a tiny 2-row parquet to harvest a consistent parquet-schema thrift +
+    per-column metadata templates."""
     arrs = [pa.array([None, None], type=f.type) for f in schema]
     tbl = pa.table(arrs, schema=schema)
     buf = pa.BufferOutputStream()
@@ -485,13 +463,11 @@ def _rows_per_rg(buf: bytes, ncols: int, limit=None):
 def repair_dataset(root: str | Path) -> bool:
     """Repair footerless parquet files under a LeRobotDataset ``root`` in place.
 
-    Returns True if anything was repaired. No-op (returns False) if both parquet
-    files already have valid footers. Corrupt files are backed up to
-    ``<root>/.corrupt-originals/`` before being overwritten. After a footer
-    rebuild, the data file and metadata file are reconciled to the same committed
-    episode count (dropping a trailing data row group written just before a crash
-    but before its metadata row), and ``meta/info.json`` is updated to match.
-    """
+    True if anything was repaired, False if both footers are already valid.
+    Corrupt files back up to ``<root>/.corrupt-originals/`` first. Data and
+    metadata are reconciled to the same committed episode count (dropping a
+    trailing data row group written just before a crash), and ``meta/info.json``
+    updated to match."""
     root = Path(root)
     info_path = root / "meta" / "info.json"
     if not info_path.exists():

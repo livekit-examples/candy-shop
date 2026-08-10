@@ -1,14 +1,4 @@
-"""LiveKit design language, ported to Dear ImGui.
-
-Colour tokens are the same *values* `portal-playground/app/globals.css` defines,
-so this desktop tool and the web console read as one product. Dark only —
-`globals.css` has no light variant either.
-
-`assets/fonts/*.ttf` are the real brand faces (Everett, Commit Mono) re-wrapped
-from the repo's woff2, which ImGui's stb_truetype can't parse; Commit Mono, being
-variable, is pinned to its regular instance. Mono is used for anything numeric so
-the layout doesn't jitter as digits change.
-"""
+"""LiveKit design language, ported to Dear ImGui."""
 from __future__ import annotations
 
 import pathlib
@@ -21,13 +11,11 @@ ASSETS_DIR = pathlib.Path(__file__).resolve().parent / "assets"
 
 
 def rgb(hex_code: str, alpha: float = 1.0) -> ImVec4:
-    """`#rrggbb` -> ImVec4, so the tokens below stay copy-pasteable from CSS."""
     h = hex_code.lstrip("#")
     return ImVec4(int(h[0:2], 16) / 255, int(h[2:4], 16) / 255, int(h[4:6], 16) / 255, alpha)
 
 
-# --- tokens (values mirror portal-playground/app/globals.css) -----------------
-
+# Values mirror portal-playground/app/globals.css.
 BG0 = rgb("#000000")
 BG1 = rgb("#070707")
 BG2 = rgb("#131313")
@@ -57,8 +45,7 @@ BG_SERIOUS = rgb("#1f0e0b")  # red-900
 
 @dataclass
 class Fonts:
-    """The loaded faces. `None` if the brand fonts are missing — the app then
-    falls back to ImGui's built-in font rather than refusing to start."""
+    """The loaded faces; `None` when the brand fonts are missing (fall back to ImGui's default)."""
     body: Optional[imgui.ImFont] = None
     small: Optional[imgui.ImFont] = None
     heading: Optional[imgui.ImFont] = None
@@ -74,8 +61,7 @@ HEADING_SIZE = 21.0
 
 
 def load_fonts() -> None:
-    """Load the brand faces. Call from HelloImGui's `load_additional_fonts`
-    callback — fonts can only be added while the backend owns the atlas."""
+    """Load the brand faces. Call from HelloImGui's `load_additional_fonts` callback."""
     hello_imgui.set_assets_folder(str(ASSETS_DIR))
     everett = "fonts/Everett-Regular.ttf"
     medium = "fonts/Everett-Medium.ttf"
@@ -92,8 +78,8 @@ def load_fonts() -> None:
 class font:
     """`with font(FONTS.mono):` — a no-op when that face didn't load.
 
-    Pushes the loaded size explicitly: ImGui 1.92's atlas is dynamic, so
-    `push_font(f, 0.0)` means *keep the current size* and would leave text
+    Pushes the loaded size explicitly: ImGui 1.92's dynamic atlas treats
+    `push_font(f, 0.0)` as "keep the current size", which would leave text
     body-sized when swapping to `FONTS.small`."""
 
     def __init__(self, face: Optional[imgui.ImFont]) -> None:
@@ -112,8 +98,6 @@ def apply_style() -> None:
     """Paint ImGui in the tokens above. Call from `setup_imgui_style`."""
     style = imgui.get_style()
 
-    # Nearly square. Borders and alignment do the separating work; ImGui has no
-    # drop shadows, and a large radius reads as decoration in a dense tool.
     style.window_rounding = 0.0
     style.child_rounding = 2.0
     style.frame_rounding = 2.0
@@ -150,24 +134,22 @@ def apply_style() -> None:
     c(C.text_selected_bg, BG_ACCENT2)
     c(C.text_link, ACCENT1)
 
-    # Inputs and checkboxes sit a step ABOVE the card rather than as black wells:
-    # pure black on a near-black card reads as a hole, and at these sizes a
-    # checkbox became invisible until hovered.
+    # A step above the card, not black wells: pure black on a near-black card
+    # reads as a hole and hid the checkbox until hovered.
     c(C.frame_bg, BG3)
     c(C.frame_bg_hovered, rgb("#2a2a2a"))
     c(C.frame_bg_active, BG_ACCENT2)
 
-    # Quiet by default; the accent is reserved for the primary action.
+    # Quiet; the accent is reserved for the primary action.
     c(C.button, BG3)
     c(C.button_hovered, rgb("#2a2a2a"))
     c(C.button_active, SEPARATOR2)
 
-    # Tabs. Unthemed these fall back to ImGui's blue and the labels vanish
-    # against a near-black window.
+    # Unthemed, tabs fall back to ImGui's blue and the labels vanish against the window.
     c(C.tab, BG1)
     c(C.tab_hovered, BG3)
     c(C.tab_selected, BG2)
-    c(C.tab_selected_overline, ACCENT1)   # the one cyan accent that marks "here"
+    c(C.tab_selected_overline, ACCENT1)
     c(C.tab_dimmed, BG1)
     c(C.tab_dimmed_selected, BG2)
     c(C.tab_dimmed_selected_overline, SEPARATOR2)

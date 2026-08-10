@@ -58,9 +58,11 @@ async def main() -> None:
             asyncio.create_task(robot.set_active_operator(None))
 
     async def reset_to_zero_position(data: RpcInvocationData) -> str:
-        """Command the parked rest pose: fold the arm to its safe pose and stop
-        the slider (`slider.vel = 0`). Claims active operator so no live stream
-        overrides it. Doubles as the preempt-anything cancel path."""
+        """Fold the arm to its safe pose and stop the slider (`slider.vel = 0`).
+
+        Claims active operator so no live stream overrides it; doubles as the
+        preempt-anything cancel path.
+        """
         nonlocal latest_action
         logger.info("[robot] reset_to_zero_position from '%s'", data.caller_identity)
         await robot.set_active_operator(robot.local_identity())

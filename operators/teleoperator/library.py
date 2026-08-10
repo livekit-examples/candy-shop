@@ -1,16 +1,10 @@
-"""Offline operations on a recorded corpus: read the episode index, relabel a
-task, delete episodes.
+"""Offline corpus operations: read the episode index, relabel, delete episodes.
 
-Everything here assumes **no recording session holds the dataset open**. lerobot
-streams episodes into a long-lived ``pyarrow.ParquetWriter`` whose footer only
-lands at ``finalize()`` — including for ``meta/episodes/*.parquet`` — so
-mid-session those files are footerless and pyarrow won't open them. Hence
-``Recorder.suspend()``/``resume()`` around every call here, and an in-memory
-episode index for the live view instead of re-reading disk on a timer.
-
-Both mutations rewrite the whole corpus (inherent to the v3.0 layout: many
-episodes share one parquet file and one concatenated mp4). Seconds to minutes —
-run them on a worker thread, never the event loop.
+Assumes no recording session holds the dataset open (mid-session the parquet
+footers aren't written), so callers bracket every mutation with
+``Recorder.suspend()``/``resume()``. Both mutations rewrite the whole corpus
+(v3.0 layout: many episodes share one parquet + one concatenated mp4), taking
+seconds to minutes — run on a worker thread, never the event loop.
 """
 from __future__ import annotations
 
@@ -33,10 +27,7 @@ def video_key(camera: str) -> str:
 
 def video_slice(row: Mapping[str, object], camera: str) -> Optional[dict]:
     """Where `camera`'s footage for one episode lives: a path relative to the
-    dataset root plus the second range it occupies inside that file.
-
-    Episodes are concatenated into shared mp4s, so a per-episode view needs the
-    offsets — not just the file."""
+    dataset root plus the second range it occupies (episodes share one mp4)."""
     key = video_key(camera)
     try:
         chunk = int(row[f"videos/{key}/chunk_index"])        # type: ignore[arg-type]
@@ -53,9 +44,7 @@ def video_slice(row: Mapping[str, object], camera: str) -> Optional[dict]:
 
 def read_episodes(root: Path, fps: int, cameras: Sequence[str] = ()) -> list[dict]:
     """The episode index as plain dicts, ordered by index; ``[]`` if absent.
-
-    Reads the parquet directly rather than via ``LeRobotDataset``, which would
-    also memory-map every frame — far more work than a list of labels needs."""
+    Reads the parquet directly (``LeRobotDataset`` would memory-map every frame)."""
     import pandas as pd
 
     paths = sorted((root).glob(EPISODES_GLOB))
@@ -101,11 +90,9 @@ def _columns_of(path: Path) -> set:
 # --- mutating ----------------------------------------------------------------
 
 def relabel_episodes(root: Path, repo_id: str, mapping: Mapping[int, str]) -> int:
-    """Rewrite specific episodes' task labels, in place; returns the count.
-
-    Costs the whole corpus even for one episode: ``modify_tasks`` rebuilds
-    ``meta/tasks.parquet`` and every data file's ``task_index`` column. Episodes
-    absent from ``mapping`` keep their task."""
+    """Rewrite specific episodes' task labels in place; returns the count. Costs
+    the whole corpus even for one episode (``modify_tasks`` rebuilds
+    ``meta/tasks.parquet`` and every ``task_index`` column)."""
     if not mapping:
         return 0
     from lerobot.datasets.dataset_tools import modify_tasks
@@ -122,12 +109,10 @@ def relabel_episodes(root: Path, repo_id: str, mapping: Mapping[int, str]) -> in
 
 
 def delete_episodes(root: Path, repo_id: str, indices: Sequence[int]) -> int:
-    """Delete episodes, leaving the result at the *same* path, reindexed.
-
-    lerobot can only write a *new* dataset, so build it in a sibling
-    ``.rewrite/`` and swap by rename, parking the original as ``.trash/`` until
-    the swap succeeds — a crash mid-rewrite leaves the original untouched.
-    Returns the remaining episode count."""
+    """Delete episodes, leaving the result at the same path, reindexed; returns
+    the remaining count. lerobot only writes a *new* dataset, so build it in a
+    sibling ``.rewrite/`` and swap by rename, parking the original as ``.trash/``
+    until the swap succeeds — a crash mid-rewrite leaves the original untouched."""
     from lerobot.datasets.dataset_tools import delete_episodes as _delete
 
     wanted = sorted({int(i) for i in indices})

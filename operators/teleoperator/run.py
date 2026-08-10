@@ -1,35 +1,10 @@
-"""The teleoperator: fly the leslider from an SO-101 leader arm and record it.
+"""Teleoperator: fly the leslider from an SO-101 leader arm and record it.
 
-Joins the LiveKit room as a Portal operator, reads one action per tick from the
-leader, and forwards it on the wire. The six leader joints mirror to the
-follower's arm ``.pos``; the leader's arrow keys drive ``slider.vel`` (the
-slider runs in velocity mode). While recording, every executed action the robot
-forwards — this leader's *and* a remote policy's, tagged by ``Action.sender`` —
-is paired with the observation it was responding to and written to a
-LeRobotDataset (see ``recorder``). So a session captures human demonstrations,
-policy rollouts, and HITL corrections in one corpus, each row carrying
-``slider.vel`` alongside the six arm ``.pos``.
+The review UI (``teleoperator-ui``) is a separate process driving this one over
+``protocol``'s RPCs, so its repaints/crashes can't stall a recording. Run:
+``uv run teleoperator`` (spawns the UI child; ``--no-ui`` records headless).
 
-This process owns the dataset and never renders anything. The review UI
-(``teleoperator-ui``) is a **separate process** driving it over ``protocol``'s RPCs,
-so nothing it does — repainting, crashing — can stall a recording; the two share
-no interpreter and no GIL. This process spawns it as a child (see ``UiProcess``)
-so one command starts both; ``--no-ui`` records headless, which is also the
-automatic choice when no display is detected.
-
-Setup — which serial port, which corpus — happens in the window, not here: the
-recorder joins the room with nothing open and waits (see ``Runtime``). A fully
-specified environment opens immediately instead, for unattended runs.
-
-Terminal hotkeys, for driving a session once it is open:
-  c  cycle the active operator through [self, *remote operators]; with no peers
-     this just claims/releases control for self. When a policy is in the room,
-     `c` is instant human <-> policy handoff.
-  r  toggle episode recording.
-  [  discard the in-flight episode.
-  t  set the task label for subsequent episodes (typed in the terminal;
-     refused while recording, so a task spans whole episodes).
-  x  quit.
+Terminal hotkeys: c=cycle active operator, r=record, [=discard, t=set task, x=quit.
 """
 from __future__ import annotations
 
@@ -54,10 +29,8 @@ from livekit.portal import (
     frame_bytes_to_numpy_rgb,
 )
 
-# lerobot renamed `lerobot.types` -> `lerobot.lerobot_types` (the `RobotAction`
-# alias moved with it). The pinned lerobot has only the new path; the leslider
-# leader package still imports the old one. Alias it before importing the leader
-# so its top-level `from lerobot.types import RobotAction` resolves.
+# The leslider leader imports the old `lerobot.types` path; the pinned lerobot
+# has only `lerobot.lerobot_types`. Alias before importing the leader.
 import lerobot.lerobot_types as _lerobot_types
 sys.modules.setdefault("lerobot.types", _lerobot_types)
 
@@ -76,16 +49,12 @@ logger = logging.getLogger(__name__)
 PACKAGE_DIR = pathlib.Path(__file__).resolve().parent
 
 
-# --- hotkeys ----------------------------------------------------------------
-
 class Hotkeys:
     """Non-blocking single-letter key capture from the terminal's own stdin.
 
-    Reads keys off ``sys.stdin`` in cbreak mode rather than via a global OS
-    keyboard hook, so hotkeys only fire while *this terminal* has focus — the
-    OS only routes stdin to the focused terminal, so keys typed into other
-    windows never reach us. (cbreak keeps ISIG on, so Ctrl-C still raises
-    KeyboardInterrupt.) No-op if stdin isn't a tty (e.g. piped/backgrounded)."""
+    cbreak mode (not a global OS hook), so hotkeys only fire while this terminal
+    has focus. cbreak keeps ISIG on, so Ctrl-C still raises KeyboardInterrupt.
+    No-op if stdin isn't a tty."""
 
     def __init__(self, keys: set[str]) -> None:
         self._keys = keys
@@ -127,10 +96,8 @@ class Hotkeys:
         return keys
 
     def pause(self) -> None:
-        """Stop capturing keys and hand stdin back to cooked mode — for when
-        the terminal is reading a line of input (e.g. typing a task) so
-        ``input()`` gets echo + line editing and watched letters in the text
-        aren't swallowed as hotkeys."""
+        """Hand stdin back to cooked mode so ``input()`` gets echo + line editing
+        and watched letters aren't swallowed as hotkeys."""
         if not self.enabled:
             return
         self._paused.set()
@@ -143,13 +110,13 @@ class Hotkeys:
             return
         tty.setcbreak(self._fd)
         with self._lock:
-            self._pending = []  # drop anything captured during the prompt
+            self._pending = []
         self._paused.clear()
 
     def _run(self) -> None:
         while not self._stop.is_set():
             if self._paused.is_set():
-                self._parked.set()  # signal pause() that we've let go of stdin
+                self._parked.set()  # signal pause() we've let go of stdin
                 self._paused_wait()
                 continue
             self._parked.clear()
@@ -162,22 +129,19 @@ class Hotkeys:
                     self._pending.append(ch)
 
     def _paused_wait(self) -> None:
-        """Sleep while paused, waking to re-check stop/paused. Never touches
-        stdin so ``input()`` on the main thread owns it exclusively."""
+        """Sleep while paused. Never touches stdin, so ``input()`` on the main
+        thread owns it exclusively."""
         while self._paused.is_set() and not self._stop.is_set():
             time.sleep(0.05)
 
 
-# --- corpus jobs ------------------------------------------------------------
-
 class JobRunner:
     """Runs one corpus mutation at a time on a dedicated thread.
 
-    A rewrite (see ``library``) is far too slow for an RPC handler — the caller
-    would time out — and on the asyncio loop would freeze the leader's tick and
-    Portal's frame delivery for minutes. So handlers validate and ``submit``;
-    this thread brackets the work in ``Recorder.suspend()``/``resume()`` and
-    reports through ``busy``/``error``, which the UI reads from the status RPC."""
+    A rewrite (see ``library``) is too slow for an RPC handler or the event loop,
+    which it would freeze for minutes. Handlers validate and ``submit``; this
+    thread brackets the work in ``Recorder.suspend()``/``resume()`` and reports
+    through ``busy``/``error``."""
 
     def __init__(self, recorder: Recorder) -> None:
         self._recorder = recorder
@@ -225,15 +189,12 @@ class JobRunner:
             self.busy = ""
 
 
-# --- the UI, as a child process ---------------------------------------------
-
 class UiProcess:
     """Launch `teleoperator-ui` as a child of this process. On by default.
 
-    The recorder stays the parent and the foreground process, which settles
-    lifetimes the tidy way round: closing the window leaves recording running
-    (this terminal and its hotkeys are still live), quitting the recorder takes
-    the window down, and neither leaves an orphan on the leader's serial port."""
+    The recorder stays the parent/foreground process, so closing the window
+    leaves recording running and quitting the recorder takes the window down —
+    neither leaves an orphan on the leader's serial port."""
 
     def __init__(self) -> None:
         self._proc: Optional[subprocess.Popen] = None
@@ -255,8 +216,7 @@ class UiProcess:
         print(f"[teleoperator] review UI started (pid {self._proc.pid})")
 
     def poll(self) -> None:
-        """Notice the window being closed, once. No respawn: reopening a window
-        you just closed is worse than saying how."""
+        """Notice the window being closed, once. No respawn."""
         if self._proc is None or self._reported_exit:
             return
         if self._proc.poll() is None:
@@ -281,7 +241,7 @@ class UiProcess:
     @staticmethod
     def _command() -> Optional[list[str]]:
         """The console script beside this interpreter, so the child lands in the
-        same venv however the recorder was launched; else run the module."""
+        same venv; else run the module."""
         script = pathlib.Path(sys.executable).parent / "teleoperator-ui"
         if script.exists():
             return [str(script)]
@@ -291,24 +251,16 @@ class UiProcess:
     def display_available() -> bool:
         """Whether opening a window stands a chance — the default for `--ui`.
 
-        Only the unambiguous headless case is detected: X11/Wayland env vars
-        unset on Linux, which is what an ssh session or a systemd unit on a robot
-        host looks like. Without this the child would start, fail to init GLFW,
-        and die with a traceback across the recorder's output every launch.
-        macOS/Windows always claim a display; `--ui`/`--no-ui` override either way.
-        """
+        Only the unambiguous headless case is detected (X11/Wayland env vars
+        unset on Linux); without this the child dies in GLFW init every launch.
+        macOS/Windows always claim a display; `--ui`/`--no-ui` override either way."""
         if sys.platform == "darwin" or sys.platform.startswith("win"):
             return True
         return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 def _metrics_snapshot(op: Operator) -> dict:
-    """Portal's counters as plain JSON.
-
-    These are the numbers that answer the questions a recording session actually
-    raises — round-trip time, how often a stale frame was reused, which track is
-    holding up the sync, per-track jitter, and buffer evictions — none of which the
-    recorder can infer on its own."""
+    """Portal's counters as plain JSON."""
     m = op.metrics()
     return {
         "rtt_ms": {
@@ -349,10 +301,8 @@ def _us_ms(value) -> Optional[float]:
 
 
 def _report_drops(recorder: Recorder, max_obs_age_us: int, fps: int) -> None:
-    """Say *why* rows are being dropped, and what to do about it.
-
-    A bare count is useless: the four causes have unrelated fixes, and picking
-    the wrong one costs a recording session."""
+    """Say why rows are being dropped, and what to do about it: the four causes
+    have unrelated fixes."""
     dropped = recorder.drain_skips()
     causes = recorder.drop_causes
     last_ms, worst_ms = recorder.pairing_age_ms
@@ -379,8 +329,7 @@ def _report_drops(recorder: Recorder, max_obs_age_us: int, fps: int) -> None:
         if not obs_fps:
             print("[teleoperator]   -> no observations are arriving at all.")
         elif obs_fps >= fps * 0.8:
-            # The trap that cost me an hour: the average rate looks healthy, so
-            # "video is slow" is wrong. Frames are arriving in bursts.
+            # Average rate looks healthy but frames arrive in bursts — not a slow camera.
             print(f"[teleoperator]   -> observations average {obs_fps:.0f}/s but arrive in "
                   f"bursts: a gap of {worst_ms:.0f}ms is what got paired. Look for "
                   f"'video stream queue overflow' / 'buffer full' warnings above — "
@@ -391,15 +340,11 @@ def _report_drops(recorder: Recorder, max_obs_age_us: int, fps: int) -> None:
                   f"raise MAX_OBS_AGE_MS only if you accept the looser alignment.")
 
 
-# --- deferred setup ---------------------------------------------------------
-
 class Runtime:
     """The leader arm and the dataset writer — the two things setup provides.
 
     They start empty so the recorder can join the room with nothing open and be
-    configured afterwards, from the window or the terminal. Everything on the hot
-    path therefore has to tolerate `None`, which is the price of not making you
-    answer questions in a terminal before the UI even exists."""
+    configured afterwards. Everything on the hot path must tolerate `None`."""
 
     def __init__(self) -> None:
         self.leader: Optional[SO101WithSliderLeader] = None
@@ -415,13 +360,11 @@ class Runtime:
 
     def open(self, *, port: str, leader_id: str, recorder: Recorder) -> None:
         """Open the leader bus, then adopt the dataset. Blocking — call on a worker
-        thread, never the event loop: a serial open takes a moment, and if the
-        motors disagree with the stored calibration lerobot stops here to run its
-        calibration routine, which reads from the teleoperator's terminal.
+        thread, never the event loop: the serial open blocks, and calibration
+        (if the motors disagree with stored calibration) reads from the terminal.
 
-        The leslider leader mirrors the six arm joints and drives ``slider.vel``
-        from its arrow keys (velocity mode); ``cruise``/``max`` velocity are the
-        held-arrow speed and the Up-arrow trim ceiling, in raw ticks/s."""
+        ``cruise``/``max`` velocity are the held-arrow speed and Up-arrow trim
+        ceiling, in raw ticks/s."""
         leader = SO101WithSliderLeader(SO101WithSliderLeaderConfig(
             id=leader_id,
             port=port,
@@ -489,8 +432,8 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
         )
 
     def open_runtime(port: str, repo_id: str, root, task: str) -> None:
-        """Open on a worker thread and report through `rt`. Never on the event
-        loop: the serial open blocks, and calibration blocks on stdin."""
+        """Open on a worker thread and report through `rt`. Never the event loop:
+        the serial open blocks, and calibration blocks on stdin."""
         rt.opening = f"opening {port}"
         rt.error = ""
         rt.started_at = time.monotonic()
@@ -509,9 +452,8 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
 
         threading.Thread(target=work, name="open-runtime", daemon=True).start()
 
-    # Latest synced obs, read on the tick to lazy-build the recorder. Both
-    # callbacks stay O(1) so Portal's video-receive tokio worker can reacquire
-    # the GIL promptly — the UI is a separate process for exactly this reason.
+    # Both callbacks must stay O(1) so Portal's video-receive worker reacquires
+    # the GIL promptly.
     latest_obs: Optional[Observation] = None
 
     def on_observation(obs: Observation) -> None:
@@ -521,7 +463,7 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
             rt.recorder.observe(obs)
 
     def on_action(action: Action) -> None:
-        # Drives recording: one executed action (any sender) = one row.
+        # One executed action (any sender) = one recorded row.
         if rt.recorder is not None:
             rt.recorder.record(action)
 
@@ -533,7 +475,6 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
 
     # --- RPC surface (see protocol) -----------------------------------------
     # Handlers run on the asyncio loop, so each is O(1) or hands off.
-
     def reply(**fields: Any) -> str:
         return json.dumps({"ok": True, **fields})
 
@@ -548,7 +489,7 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
         return parsed if isinstance(parsed, dict) else {}
 
     def status() -> dict:
-        """Always answers, configured or not — the setup screen needs a reply too."""
+        """Always answers, configured or not — the setup screen needs a reply."""
         base = {
             "identity": op.local_identity(),
             "configured": rt.configured,
@@ -628,8 +569,8 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
         limit = min(int(body.get("limit", protocol.EPISODE_PAGE_LIMIT) or 0),
                     protocol.EPISODE_PAGE_LIMIT)
         episodes = rt.recorder.episodes
-        # Strip the video offsets: they're per-camera and would roughly double the
-        # page. METHOD_EPISODE_VIDEO serves them for the one episode being viewed.
+        # Strip video offsets (per-camera, would ~double the page);
+        # METHOD_EPISODE_VIDEO serves them per viewed episode.
         page = [{k: v for k, v in e.items() if k != "videos"}
                 for e in episodes[offset:offset + limit]]
         return reply(total=len(episodes), offset=offset, revision=rt.recorder.revision,
@@ -765,12 +706,9 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
     ):
         op.register_rpc_method(method, handler)
 
-    # Before any hotkey capture: if the motors' stored calibration disagrees with
-    # the file for this leader `id`, lerobot's connect() runs its calibration
-    # routine, which drives the operator through blocking `input()` prompts. Those
-    # need the terminal in normal (cooked) mode, so `Hotkeys.start()` — which puts
-    # stdin in cbreak — must not have run yet. It hasn't; keep it that way.
-    # So `teleoperator-ui` can find this peer. Not under `vla_demo.*` — see protocol.
+    # Calibration prompts need cooked-mode stdin, so `Hotkeys.start()` (cbreak)
+    # must not run before it. Keep it that way.
+    # ATTR_ROLE lets `teleoperator-ui` find this peer; not under `vla_demo.*` (see protocol).
     attrs = {protocol.ATTR_ROLE: protocol.ROLE_RECORDER}
 
     print(f"[teleoperator] wire contract: {config_path}")
@@ -781,8 +719,7 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
     me = op.local_identity()
 
     print(f"[teleoperator] connected as '{me}' @ {fps} fps")
-    # Spawn only once we're in the room, so the UI's first poll finds us instead
-    # of flashing "no recorder".
+    # Spawn only once we're in the room, so the UI's first poll finds us.
     ui = UiProcess()
     if with_ui is None:
         with_ui = UiProcess.display_available()
@@ -792,8 +729,7 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
     if with_ui:
         ui.start()
 
-    # Open now if the environment already says everything, otherwise wait to be
-    # told. Setup is the window's job; there is no terminal questionnaire.
+    # Open now if the environment fully specifies a session, else wait for setup.
     preset = session.from_env(env_port, env_repo_id, env_root, env_task)
     if preset is not None:
         print(f"[teleoperator] {preset.describe()}")
@@ -806,14 +742,13 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
               "plus DATASET_REPO_ID/DATASET_ROOT to skip this")
 
     # The same rebindable bindings the window uses, so a foot pedal works in
-    # either place. `t`/`x` are terminal-only (there is no window equivalent of
-    # typing a task or quitting the process), so they stay fixed.
+    # either place. `t`/`x` are terminal-only and stay fixed.
     keys = shortcuts.load()
     key_record = shortcuts.terminal_chars(keys, "record")
     key_discard = shortcuts.terminal_chars(keys, "discard")
     key_claim = shortcuts.terminal_chars(keys, "claim")
-    # Bindings are matched before t/x below, so a binding on either would shadow
-    # them silently. Say so rather than leave you wondering why `t` stopped working.
+    # Bindings match before t/x below, so a binding on either would shadow it
+    # silently — warn rather than leave you wondering why `t` stopped working.
     if clash := ({"t", "x"} & (key_record | key_discard | key_claim)):
         print(f"[teleoperator] note: {sorted(clash)} is bound to a recording action, "
               f"so it no longer sets the task / quits in this terminal")
@@ -824,10 +759,9 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
     hotkeys.start()
     quit_requested = False
 
-    # Treat kill / terminal-close as a clean quit so the `finally` runs
-    # recorder.finalize() and the parquet footers land. Without this, SIGTERM/
-    # SIGHUP leave footerless files — repairable, but best avoided. SIGINT
-    # already surfaces as KeyboardInterrupt.
+    # Treat kill / terminal-close as a clean quit so `finally` runs finalize()
+    # and the parquet footers land. Otherwise SIGTERM/SIGHUP leave footerless
+    # files (repairable, but best avoided). SIGINT already raises KeyboardInterrupt.
     def _request_quit(signame: str) -> None:
         nonlocal quit_requested
         if not quit_requested:
@@ -870,8 +804,8 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
                     if recorder.is_recording:
                         print("[teleoperator] stop recording (r) before changing the task")
                     else:
-                        # Pause capture so a typed c/r/[/x/t isn't eaten as a
-                        # command, and read off-thread so the tick keeps pacing.
+                        # Pause capture so typed chars aren't eaten as commands,
+                        # and read off-thread so the tick keeps pacing.
                         hotkeys.pause()
                         try:
                             new_task = (await loop.run_in_executor(
@@ -888,10 +822,9 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
             if quit_requested:
                 break
 
-            # Always send once the arm is open; the robot gates on the active
-            # operator, so keeping the leader in sync makes takeover instant.
-            # Including during a job — the arm stays live while the dataset is
-            # rewritten; only recording pauses.
+            # Always send once the arm is open (even during a job): the robot
+            # gates on the active operator, so keeping the leader in sync makes
+            # takeover instant. Only recording pauses during a rewrite.
             if rt.leader is not None:
                 op.send_action(rt.leader.get_action(),
                                timestamp_us=int(time.time() * 1_000_000))
@@ -904,8 +837,7 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
                 if recorder.ensure_dataset(frame_bytes_to_numpy_rgb(f0.data, f0.width, f0.height)):
                     print(f"[teleoperator] dataset ready (episodes so far={recorder.episode_count})")
 
-            # Every 5s, surface dropped rows (stalled obs stream), and notice the
-            # UI window being closed.
+            # Every 5s: surface dropped rows, and notice the UI window closing.
             if tick % (fps * 5) == 0:
                 if recorder is not None and recorder.skipped_frames > 0:
                     _report_drops(recorder, max_obs_age_us, fps)
