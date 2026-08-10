@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import pathlib
 
 from dotenv import load_dotenv
 from livekit import rtc
@@ -32,7 +33,10 @@ from voice_agent.task import GiveCandy
 
 logger = logging.getLogger("agent")
 
-load_dotenv(".env.local")
+# Single source of config: the repo-root .env (.env.local overrides it).
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+load_dotenv(_REPO_ROOT / ".env")
+load_dotenv(_REPO_ROOT / ".env.local", override=True)
 
 
 class CandyShopAssistant(Agent):
