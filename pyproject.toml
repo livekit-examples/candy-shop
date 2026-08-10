@@ -25,6 +25,8 @@ robot = "robot.run:cli"
 move-to = "operators.move_to.run:cli"
 policy = "operators.policy.run:cli"
 policy-train = "operators.policy.train:cli"
+reward = "operators.reward.run:cli"
+reward-train = "operators.reward.train:cli"
 teleoperator = "operators.teleoperator.run:cli"
 teleoperator-ui = "operators.teleoperator.ui.app:cli"
 

@@ -1,23 +1,4 @@
-"""Operator side: the candy shop's picker (MolmoAct2 policy, arm only).
-
-Joins the leslider room as an Operator peer and serves one RPC:
-
-``run_policy(task)``
-  ``task`` is a natural-language instruction (``"pick up the red candy"``). The
-  operator claims active control, then each tick feeds the two camera frames +
-  the six arm ``.pos`` into MolmoAct2 and streams the predicted arm action back
-  to the robot. **This is the manipulation half of an order.** The slider is
-  held still (``slider.vel = 0``) — placement along the rail is the ``move_to``
-  operator's job — so the policy only ever drives the arm. Runs until the model
-  is done, a ``duration`` elapses, or ``stop`` preempts it, then releases.
-
-The ``slider.vel`` field is ignored on both sides: it is never fed to the model
-(the checkpoint is a six-DOF SO-101 arm) and is pinned to 0 on every action.
-
-Parking the rig stays with the robot's own ``reset_to_zero_position``
-(``robot/run.py``), which doubles as the preempt-anything cancel.
-
-Usage::
+"""Picker operator: serve MolmoAct2 (six-DOF arm) over the ``run_policy`` RPC.
 
     uv run policy                             # default SO-101 checkpoint, zero-shot
     uv run policy --checkpoint outputs/molmoact2-candy/pretrained_model
@@ -131,7 +112,7 @@ class PolicyRunner:
         return action.squeeze(0).cpu()
 
     def _send_arm(self, slider_vel: float) -> None:
-        """Send the current arm pose held plus a slider velocity (used to stop)."""
+        """Hold the current arm pose, sending the given slider velocity."""
         action = {key: float(self._state[key]) for key in ARM_POS_KEYS}
         action[SLIDER_VEL_KEY] = float(slider_vel)
         self._op.send_action(action, timestamp_us=_now_us(), in_reply_to_ts_us=self._obs_ts_us)
@@ -155,14 +136,16 @@ class PolicyRunner:
                 if self._stop.is_set():
                     reason = "stopped"
                     break
-                if time.monotonic() - t0 > self._duration_s:
+                # duration <= 0 means run forever: the reward operator's run_task
+                # owns the stop signal (via the stop RPC), not a wall-clock cap.
+                if self._duration_s > 0 and time.monotonic() - t0 > self._duration_s:
                     reason = "duration"
                     break
                 if not self._ready:
                     continue
 
-                # Settle gate: wait for the arm to reach the last action before
-                # inferencing on the (now stationary) observation.
+                # Wait for the arm to reach the last action before inferencing on
+                # the (now stationary) observation.
                 await self._settle.wait(lambda: self._state, self._stop)
                 if self._stop.is_set():
                     reason = "stopped"
@@ -200,8 +183,8 @@ def _load_policy(checkpoint: str, device: str, inference_action_mode: str):
     policy = policy.to(device)
     policy.eval()
 
-    # Load the checkpoint's saved processors (they carry the normalization
-    # stats); just retarget the device step to wherever we're running.
+    # The checkpoint's saved processors carry the normalization stats; retarget
+    # the device step to wherever we're running.
     preprocessor, postprocessor = make_pre_post_processors(
         policy_cfg=policy.config,
         pretrained_path=checkpoint,
@@ -215,7 +198,8 @@ async def main() -> None:
     parser.add_argument("--checkpoint", default=env_str("POLICY_CHECKPOINT", DEFAULT_CHECKPOINT))
     parser.add_argument("--task", default=env_str("POLICY_TASK", "pick up the candy"))
     parser.add_argument("--device", default=env_str("POLICY_DEVICE", "cuda" if torch.cuda.is_available() else "cpu"))
-    parser.add_argument("--duration", type=float, default=float(env_str("POLICY_DURATION_S", "30")))
+    parser.add_argument("--duration", type=float, default=float(env_str("POLICY_DURATION_S", "0")),
+                        help="Wall-clock cap in seconds; <=0 runs forever until a stop RPC (the reward operator drives this).")
     parser.add_argument("--inference-action-mode", default=env_str("POLICY_INFERENCE_ACTION_MODE", "continuous"))
     parser.add_argument("--settle-tolerance", type=float, default=float(env_str("POLICY_SETTLE_TOLERANCE", "2.0")),
                         help="Max per-joint error to call the arm settled; <=0 disables the gate.")
@@ -237,8 +221,8 @@ async def main() -> None:
         args.checkpoint, args.device, args.inference_action_mode
     )
 
-    # Map the policy's expected image keys onto our two physical cameras:
-    # primary (external overhead) first, wrist (arm-mounted) second.
+    # Map the policy's image keys onto physical cameras: primary (overhead)
+    # first, wrist (arm-mounted) second.
     image_keys = resolve_image_keys(policy.config)
     physical = [env_str("POLICY_PRIMARY_CAMERA", "overhead_camera"), env_str("POLICY_WRIST_CAMERA", "arm_camera")]
     if len(image_keys) > len(physical):

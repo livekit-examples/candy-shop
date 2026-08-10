@@ -8,20 +8,16 @@ from livekit.agents import AgentTask
 from voice_agent.config import (
     MOVE_TO_IDENTITY,
     POSITIONS,
+    REWARD_IDENTITY,
     RPC_TIMEOUT_S,
-    RUN_POLICY_IDENTITY,
+    RUN_TASK_TIMEOUT_S,
 )
 
 logger = logging.getLogger("agent")
 
 
 class GiveCandy(AgentTask[bool]):
-    """Picks one candy off the shelf and drops it in the drop zone.
-
-    Runs as a self-contained task: on entry it takes over the session, executes the
-    physical routine over RPC, and completes with ``True`` on success or ``False`` if
-    any step fails. Awaiting the task yields that result.
-    """
+    """Picks one candy off the shelf and drops it in the drop zone. Awaiting yields success/failure."""
 
     def __init__(self, room: rtc.Room, candy_name: str, chat_ctx=None) -> None:
         self.room = room
@@ -33,20 +29,19 @@ class GiveCandy(AgentTask[bool]):
         )
 
     async def on_enter(self) -> None:
-        # Narrate each step so the user hears progress during the multi-second
-        # routine. say() isn't awaited, so speech plays alongside the RPCs.
+        # say() isn't awaited, so speech plays alongside the RPCs.
         try:
             self.session.say("Heading over to the candy shelf.")
             await self._move_to("candy shelf")
 
             self.session.say(f"Picking up your {self.candy_name}.")
-            await self._run_policy(f"Pick up {self.candy_name}")
+            await self._run_task(f"Pick up {self.candy_name}")
 
             self.session.say("Bringing it over to you.")
             await self._move_to("drop zone")
 
             self.session.say("And here you go!")
-            await self._run_policy(f"Drop {self.candy_name}")
+            await self._run_task(f"Drop {self.candy_name}")
         except Exception:
             logger.exception("failed to give candy: %s", self.candy_name)
             self.complete(False)
@@ -55,7 +50,6 @@ class GiveCandy(AgentTask[bool]):
         self.complete(True)
 
     async def _move_to(self, position: str) -> None:
-        """Drive the robot to a named waypoint."""
         if position not in POSITIONS:
             raise ValueError(
                 f"Unknown position {position!r}; expected one of {list(POSITIONS)}."
@@ -68,11 +62,12 @@ class GiveCandy(AgentTask[bool]):
             response_timeout=RPC_TIMEOUT_S,
         )
 
-    async def _run_policy(self, task: str) -> None:
-        """Ask the manipulation policy to execute a pick or drop."""
+    async def _run_task(self, task: str) -> None:
+        """Run one manipulation task: the reward operator drives the policy and
+        watches SARM for completion, returning once the task is done."""
         await self.room.local_participant.perform_rpc(
-            destination_identity=RUN_POLICY_IDENTITY,
-            method="run_policy",
+            destination_identity=REWARD_IDENTITY,
+            method="run_task",
             payload=task,
-            response_timeout=RPC_TIMEOUT_S,
+            response_timeout=RUN_TASK_TIMEOUT_S,
         )
