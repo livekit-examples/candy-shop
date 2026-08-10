@@ -1,0 +1,52 @@
+[project]
+name = "candy-shop-demo"
+version = "0.1.0"
+description = "Candy-shop robot demo: an SO-101-on-a-slider (leslider) driven over LiveKit Portal by a voice agent."
+requires-python = ">=3.12,<3.13"   # livekit-portal ships cp312 wheels only
+dependencies = [
+    "livekit-portal>=0.2.4",
+    "livekit-api>=0.7",
+    "livekit>=1.1.8",
+    # Pinned exact (matches the release checkpoints were trained against);
+    # feetech = the SO-101 motor bus. `uv lock --upgrade` can't drift it.
+    "lerobot[feetech]==0.6.0",
+    # LeSlider hardware wrappers (SO-101 arm on a linear slider), position-mode:
+    # follower (robot) and leader (teleoperator).
+    "lerobot_robot_so101_slider_pos",
+    "lerobot_teleoperator_so101_with_slider_pos",
+    "torch>=2.2",
+    # Direct dep only so the cu128 source override below applies to it (uv
+    # honors source overrides for direct deps only); otherwise it resolves a
+    # CUDA-13 wheel from PyPI on Linux and mismatches the cu128 torch build.
+    "torchvision",
+    "numpy>=1.24",
+    "python-dotenv>=1",
+    "opencv-python>=4.5",   # lerobot cameras
+]
+
+[project.scripts]
+robot = "robot.run:cli"
+
+[[tool.uv.index]]
+# Consulted only for packages that reference it below (torch/torchvision).
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+# Position-mode `_pos` API (slider.pos in 0..100); pinned to the commit shipping it.
+lerobot_robot_so101_slider_pos = { git = "https://github.com/pham-tuan-binh/leslider", subdirectory = "packages/lerobot_robot_so101_slider_pos"}
+lerobot_teleoperator_so101_with_slider_pos = { git = "https://github.com/pham-tuan-binh/leslider", subdirectory = "packages/lerobot_teleoperator_so101_with_slider_pos"}
+# CUDA build on Linux; PyPI wheel elsewhere (no cu128 wheel for macOS arm64).
+torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true   # leslider packages are git direct references
+
+[tool.hatch.build.targets.wheel]
+packages = ["robot", "utilities"]

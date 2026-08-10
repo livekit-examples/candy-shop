@@ -1,8 +1,8 @@
 """Hardware builders and observation shaping for the leslider rig.
 
-Concentrates everything that's about *the hardware* — serial ports, cameras,
-the SO-101 follower and leader — so `robot/run.py` and the teleoperator can
-stay focused on the Portal-side flow.
+Concentrates everything that's about *the hardware* — cameras and the SO-101
+follower and leader — so `robot/run.py` and the teleoperator can stay focused
+on the Portal-side flow.
 
 The leslider is an SO-101 arm on a linear slider. The slider runs in extended
 (multi-turn) position mode, so every joint is a normalized `.pos` and the
@@ -10,7 +10,6 @@ slider reports/commands a unified `slider.pos` in 0..100.
 """
 from __future__ import annotations
 
-import os
 import platform
 
 import numpy as np
@@ -25,14 +24,7 @@ from lerobot_teleoperator_so101_with_slider_pos import (
     SO101WithSliderPosLeaderConfig,
 )
 
-from utilities.common import (
-    env_bool,
-    env_camera_id,
-    env_int,
-    env_str,
-)
-from utilities.ports import ENV_VAR as LEADER_PORT_ENV_VAR
-from utilities.ports import resolve_leader_port
+from utilities.common import env_bool, env_camera_id, env_int, env_str
 
 CAMERAS: tuple[str, ...] = ("arm_camera", "overhead_camera")
 
@@ -71,12 +63,11 @@ def build_follower(fps: int) -> SO101SliderPosFollower:
 
 
 def build_leader(port: str | None = None) -> SO101WithSliderPosLeader:
-    """Construct the SO-101 leader arm + slider keyboard handler.
-    """
+    """Construct the SO-101 leader arm + slider (teleoperation input)."""
     return SO101WithSliderPosLeader(
         SO101WithSliderPosLeaderConfig(
             id=env_str("SO101_LEADER_ID", "so101_leader"),
-            port=resolve_leader_port(port, env_port=os.getenv(LEADER_PORT_ENV_VAR)),
+            port=port or env_str("SO101_LEADER_PORT", "/dev/ttyACM0"),
             invert_direction=env_bool("LESLIDER_INVERT_SLIDER", default=False),
         )
     )

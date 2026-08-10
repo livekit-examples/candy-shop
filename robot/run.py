@@ -22,7 +22,7 @@ from livekit.portal import (
 
 from utilities.common import env_str, load_env, mint_token, pace, required_env
 from utilities.leslider import CAMERAS, build_follower, split_state_frames
-from utilities.rest_pose import ALL_POS_KEYS, RESET_POSE_DEFAULTS
+from utilities.rest_pose import RESET_POSE_DEFAULTS
 
 IDENTITY = "robot"
 CONFIG_PATH = pathlib.Path(__file__).resolve().parent.parent / "portal.yaml"
@@ -38,7 +38,7 @@ async def main() -> None:
     load_env(pathlib.Path(__file__).resolve().parent)
 
     url = required_env("LIVEKIT_URL")
-    room = env_str("LIVEKIT_ROOM", "portal-hitl")
+    room = env_str("LIVEKIT_ROOM", "candy-shop")
     token = mint_token(IDENTITY, room)
 
     cfg = RobotConfig.from_yaml_file(CONFIG_PATH, room)

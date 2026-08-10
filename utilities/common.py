@@ -4,11 +4,8 @@ env loading, LiveKit token minting, and an async fps pacer — the plumbing ever
 entry script (`robot/run.py`, `operators/<name>/run.py`) needs and must not
 re-implement.
 
-Installed as the `candy_shop` package of the single root uv project, so
-scripts import `from candy_shop.common import ...` directly. The name is
-deliberately project-unique (not `utils`/`common`): a robot host often has a
-polluting global `PYTHONPATH` (e.g. a ROS workspace) searched before the repo,
-and a generic top-level name there would shadow ours.
+Installed as the `utilities` package of the single root uv project, so
+scripts import `from utilities.common import ...` directly.
 """
 from __future__ import annotations
 
