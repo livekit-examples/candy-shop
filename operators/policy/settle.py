@@ -11,7 +11,7 @@ import logging
 import time
 from typing import Callable, Mapping, Optional
 
-from utilities.common import pace
+from shared.common import pace
 
 logger = logging.getLogger(__name__)
 

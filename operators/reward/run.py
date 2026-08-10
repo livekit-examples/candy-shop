@@ -45,7 +45,7 @@ from livekit.portal import (
     frame_bytes_to_numpy_rgb,
 )
 
-from utilities.common import env_str, load_env, mint_token, required_env
+from shared.common import env_str, load_env, mint_token, required_env
 
 from operators.reward.sarm import ClipEncoder, DEFAULT_CHECKPOINT, ProgressScorer, load_reward_model
 

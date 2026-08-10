@@ -28,7 +28,7 @@ import numpy as np
 
 from livekit.portal import Operator, OperatorConfig
 
-from utilities.common import env_str, load_env, mint_token, pace, required_env
+from shared.common import env_str, load_env, mint_token, pace, required_env
 
 from operators.move_to import config
 from operators.move_to.servo import SliderServo

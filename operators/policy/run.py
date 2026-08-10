@@ -23,8 +23,8 @@ from lerobot.policies import make_pre_post_processors
 from lerobot.policies.utils import prepare_observation_for_inference
 from lerobot.utils.constants import OBS_STATE
 
-from utilities.common import env_str, load_env, mint_token, pace, required_env
-from utilities.rest_pose import ARM_POS_KEYS, SLIDER_VEL_KEY
+from shared.common import env_str, load_env, mint_token, pace, required_env
+from shared.rest_pose import ARM_POS_KEYS, SLIDER_VEL_KEY
 
 from operators.policy.molmoact import ACTION_NAMES, DEFAULT_CHECKPOINT, resolve_image_keys
 from operators.policy.settle import SettleGate

@@ -8,8 +8,8 @@ from typing import Optional
 
 from livekit.portal import Observation, Operator, RpcError, frame_bytes_to_numpy_rgb
 
-from utilities.common import pace
-from utilities.rest_pose import ARM_POS_KEYS, SLIDER_VEL_KEY
+from shared.common import pace
+from shared.rest_pose import ARM_POS_KEYS, SLIDER_VEL_KEY
 
 from operators.move_to import config
 from operators.move_to.vision import ArucoDetector, MarkerDetection, SafeZone

@@ -16,7 +16,7 @@ from lerobot_robot_so101_slider import (
     SO101SliderFollowerConfig,
 )
 
-from utilities.common import env_camera_id, env_int, env_str
+from shared.common import env_camera_id, env_int, env_str
 
 CAMERAS: tuple[str, ...] = ("arm_camera", "overhead_camera")
 

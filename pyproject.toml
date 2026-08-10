@@ -52,4 +52,4 @@ build-backend = "hatchling.build"
 allow-direct-references = true   # leslider packages are git direct references
 
 [tool.hatch.build.targets.wheel]
-packages = ["robot", "utilities", "operators"]
+packages = ["robot", "shared", "operators"]

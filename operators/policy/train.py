@@ -23,7 +23,7 @@ from lerobot.policies.molmoact2.configuration_molmoact2 import MolmoAct2Config
 from lerobot.utils.collate import lerobot_collate_fn
 from lerobot.utils.constants import ACTION
 
-from utilities.common import load_env
+from shared.common import load_env
 
 from operators.policy.molmoact import DEFAULT_CHECKPOINT, SliderDroppedDataset
 

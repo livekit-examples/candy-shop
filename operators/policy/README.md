@@ -18,7 +18,7 @@ carriage).
 
 MolmoAct2's SO-101 checkpoint is a **six-DOF arm** with no slider, but the
 leslider wire contract carries a 7th `slider.vel` field (see
-`utilities/rest_pose.py`). So it is dropped end to end: `SliderDroppedDataset`
+`shared/rest_pose.py`). So it is dropped end to end: `SliderDroppedDataset`
 slices the column out of `observation.state`/`action` for training; at inference
 the operator feeds the six arm `.pos` and pins `slider.vel = 0`.
 

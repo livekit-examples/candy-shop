@@ -15,7 +15,7 @@ import pathlib
 
 from livekit.portal import Operator, OperatorConfig, RpcError, RpcInvocationData
 
-from utilities.common import env_str, load_env, mint_token, required_env
+from shared.common import env_str, load_env, mint_token, required_env
 
 from operators.move_to import config
 from operators.move_to.servo import SliderServo

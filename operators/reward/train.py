@@ -34,7 +34,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetad
 from lerobot.rewards import SARMConfig, make_reward_model, make_reward_pre_post_processors
 from lerobot.utils.collate import lerobot_collate_fn
 
-from utilities.common import load_env
+from shared.common import load_env
 
 from operators.reward.sarm import image_key_for
 

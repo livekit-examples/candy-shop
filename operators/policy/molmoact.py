@@ -2,7 +2,7 @@
 drop-the-slider rule.
 
 MolmoAct2's SO-101 checkpoint is a six-DOF arm with no slider, but the leslider
-wire contract carries a 7th ``slider.vel`` field (see ``utilities/rest_pose.py``).
+wire contract carries a 7th ``slider.vel`` field (see ``shared/rest_pose.py``).
 So it is dropped end to end: training slices the column out of tensors, feature
 metadata, and norm stats (:class:`SliderDroppedDataset`); inference feeds the six
 arm ``.pos`` and pins ``slider.vel = 0`` (the ``move_to`` operator owns the slider).
@@ -16,7 +16,7 @@ import torch
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.constants import ACTION, OBS_STATE
 
-from utilities.rest_pose import ARM_POS_KEYS
+from shared.rest_pose import ARM_POS_KEYS
 
 # Six-DOF, two cameras; ships the SO-100/101 joint-frame correction, so zero-shot
 # deployment needs no extra flags.
