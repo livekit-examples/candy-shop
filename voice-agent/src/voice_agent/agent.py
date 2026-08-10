@@ -21,8 +21,7 @@ from livekit.plugins import ai_coustics
 
 from voice_agent.config import (
     LLM_MODEL,
-    MOVE_TO_IDENTITY,
-    PARTICIPANT_IDENTITY,
+    ROBOT_IDENTITY,
     RPC_TIMEOUT_S,
     STT_MODEL,
     TTS_MODEL,
@@ -68,7 +67,7 @@ class CandyShopAssistant(Agent):
         def on_track_subscribed(track, publication, participant):
             if (
                 track.kind == rtc.TrackKind.KIND_VIDEO
-                and participant.identity == PARTICIPANT_IDENTITY
+                and participant.identity == ROBOT_IDENTITY
                 and publication.name == VIDEO_TRACK_NAME
             ):
                 self.video_stream = rtc.VideoStream(track)
@@ -109,8 +108,8 @@ class CandyShopAssistant(Agent):
     async def reset(self, context: RunContext) -> None:
         """Reset the robot to its home position after a failure or a finished order."""
         await self.room.local_participant.perform_rpc(
-            destination_identity=MOVE_TO_IDENTITY,
-            method="reset_robot",
+            destination_identity=ROBOT_IDENTITY,
+            method="reset_to_zero_position",
             payload="",
             response_timeout=RPC_TIMEOUT_S,
         )

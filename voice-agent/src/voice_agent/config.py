@@ -1,7 +1,7 @@
 """Shared configuration for the candy shop agent."""
 
 # Participant / track identities in the LiveKit room.
-PARTICIPANT_IDENTITY = "robot"
+ROBOT_IDENTITY = "robot"
 VIDEO_TRACK_NAME = "overhead_camera"
 
 # Identities of the robot control services we drive over RPC.
