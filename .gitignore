@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments / uv
+.venv/
+venv/
+
+# Tooling caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment / secrets (keep .env.example tracked)
+.env
+.env.*
+!.env.example
+
+# Model weights / large artifacts
+checkpoints/
+
+# Editor / OS / tooling
+.claude/
+.DS_Store
+.idea/
+.vscode/
+*.swp
