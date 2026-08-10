@@ -1,0 +1,47 @@
+[project]
+name = "voice-agent"
+version = "0.1.0"
+description = "LiveKit voice AI agent (STT-LLM-TTS pipeline)"
+readme = "README.md"
+authors = [
+    { name = "pham-tuan-binh", email = "binh.pham@livekit.io" }
+]
+requires-python = ">=3.10, <3.15"
+dependencies = [
+    "livekit-agents>=1.6.1",
+    "livekit-plugins-ai-coustics~=0.2",
+    "python-dotenv",
+]
+
+[project.scripts]
+voice-agent = "voice_agent:main"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+[tool.uv]
+constraint-dependencies = ["yarl<1.24"]
+
+[build-system]
+requires = ["uv_build>=0.9.26,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "B", "A", "C4", "UP", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
