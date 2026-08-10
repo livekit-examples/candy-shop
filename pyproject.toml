@@ -9,12 +9,15 @@ dependencies = [
     "livekit>=1.1.8",
     "lerobot[feetech,molmoact2,dataset]==0.6.1",
     "lerobot_robot_so101_slider",
+    "lerobot_teleoperator_so101_with_slider",
+    "pynput>=1.7",          # teleoperator leader: arrow keys drive slider.vel
     "torch>=2.2",
     "torchvision",
     "numpy>=1.24",
     "python-dotenv>=1",
     "opencv-python>=4.7",   # lerobot cameras + move_to ArUco (cv2.aruco) + debug windows
     "pyyaml>=6",            # move_to safe_zone.yaml
+    "imgui-bundle>=1.92",   # teleoperator review UI (bundled glfw/OpenGL backend)
 ]
 
 [project.scripts]
@@ -22,6 +25,8 @@ robot = "robot.run:cli"
 move-to = "operators.move_to.run:cli"
 policy = "operators.policy.run:cli"
 policy-train = "operators.policy.train:cli"
+teleoperator = "operators.teleoperator.run:cli"
+teleoperator-ui = "operators.teleoperator.ui.app:cli"
 
 [[tool.uv.index]]
 # Consulted only for packages that reference it below (torch/torchvision).
@@ -31,6 +36,7 @@ explicit = true
 
 [tool.uv.sources]
 lerobot_robot_so101_slider = { git = "https://github.com/pham-tuan-binh/leslider", subdirectory = "packages/lerobot_robot_so101_slider"}
+lerobot_teleoperator_so101_with_slider = { git = "https://github.com/pham-tuan-binh/leslider", subdirectory = "packages/lerobot_teleoperator_so101_with_slider"}
 torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
 torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
 
