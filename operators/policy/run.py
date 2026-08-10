@@ -2,7 +2,7 @@
 
 Joins the leslider room as an Operator peer and serves one RPC:
 
-``pick(task)``
+``run_policy(task)``
   ``task`` is a natural-language instruction (``"pick up the red candy"``). The
   operator claims active control, then each tick feeds the two camera frames +
   the six arm ``.pos`` into MolmoAct2 and streams the predicted arm action back
@@ -255,9 +255,9 @@ async def main() -> None:
         settle_tolerance=args.settle_tolerance, settle_timeout_s=args.settle_timeout,
     )
 
-    async def pick(data: RpcInvocationData) -> str:
+    async def run_policy(data: RpcInvocationData) -> str:
         """Run the policy for one order. Payload: task string or {"task": ...}."""
-        logger.info("[policy] pick RPC from '%s'", data.caller_identity)
+        logger.info("[policy] run_policy RPC from '%s'", data.caller_identity)
         task = _payload_task(data, args.task)
         runner.require_ready()
         return json.dumps(await runner.pick(task))
@@ -268,14 +268,14 @@ async def main() -> None:
         runner.request_stop()
         return json.dumps({"stopped": True})
 
-    op.register_rpc_method("pick", pick)
+    op.register_rpc_method("run_policy", run_policy)
     op.register_rpc_method("stop", stop)
     op.on_operator_joined(lambda i: logger.info("[policy] operator joined: %s", i))
     op.on_operator_left(lambda i: logger.info("[policy] operator left: %s", i))
 
     logger.info("[policy] connecting to %s as '%s' in room '%s' ...", url, IDENTITY, room)
     await op.connect(url, token)
-    logger.info("[policy] connected as '%s'; awaiting pick RPCs", op.local_identity())
+    logger.info("[policy] connected as '%s'; awaiting run_policy RPCs", op.local_identity())
 
     try:
         await asyncio.Event().wait()
