@@ -27,6 +27,10 @@ htmlcov/
 # Model weights / large artifacts
 checkpoints/
 
+# Per-rig calibration written by move-to-calibrate (clicked on your own camera)
+operators/move_to/safe_zone.yaml
+operators/move_to/safe_zone_frame.png
+
 # Editor / OS / tooling
 .claude/
 .DS_Store
