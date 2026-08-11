@@ -15,8 +15,8 @@ RUN_TASK_TIMEOUT_S = 35.0
 
 # Named waypoints mapped to raw positions the move service understands.
 POSITIONS = {
-    "candy shelf": 30,
-    "drop zone": 80,
+    "candy shelf": 20,
+    "drop zone": 70,
 }
 
 # Served through LiveKit Inference (no per-provider API keys required).

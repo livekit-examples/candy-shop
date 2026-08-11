@@ -1,7 +1,7 @@
 """Tuning constants for the move_to positioner. Edit and restart."""
 
 # "vertical" -> marker moves up/down; "horizontal" -> left/right. Re-run calibrate.py after changing.
-AXIS = "vertical"
+AXIS = "horizontal"
 
 MARKER_DICT = "DICT_4X4_50"
 MARKER_ID = 10
@@ -38,7 +38,7 @@ MAX_VELOCITY = 2800.0     # hard clamp on |slider.vel| (raw ticks/s)
 # hardware.
 APPROACH_FULL_SPEED_PX = 60.0
 
-INVERT = False           # flip if the camera sees the rail's travel reversed
+INVERT = True            # flip if the camera sees the rail's travel reversed
 CONVERGE_TICKS = 3        # consecutive in-deadzone ticks before a move counts as reached
 TIMEOUT_S = 20.0          # give up (and stop) after this many seconds
 
