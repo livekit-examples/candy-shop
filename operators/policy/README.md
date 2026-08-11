@@ -42,10 +42,14 @@ uv run policy --checkpoint outputs/molmoact2-candy/pretrained_model   # your fin
 uv run policy --task "pick up the blue candy" --duration 20
 ```
 
-**Settle gate:** before each inference the operator waits until the observed arm
-reaches the last command (within `--settle-tolerance` per joint, giving up after
-`--settle-timeout` seconds), sending nothing meanwhile. Set `--settle-tolerance 0`
-to disable it and stream open-loop at `fps`.
+**Settle gate:** MolmoAct2 emits 30-step chunks — `select_action` pops one step
+per tick and only runs the model when the chunk drains. The gate sits at that
+**replan boundary**: a fresh chunk is planned from a single observation, so the
+arm (and the camera frame paired with it) must have caught up to the last
+command first — within `--settle-tolerance` per joint, or once the arm stops
+moving, or after `--settle-timeout` seconds. The mid-chunk pops in between are
+not gated and execute at `fps`. Set `--settle-tolerance 0` to replan the instant
+the chunk drains.
 
 ## Training
 

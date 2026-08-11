@@ -72,7 +72,7 @@ class PolicyRunner:
         self._post = postprocessor
         self._camera_for_key = camera_for_key  # policy image key -> physical camera name
         self._settle = SettleGate(
-            keys=ARM_POS_KEYS, tolerance=settle_tolerance, timeout_s=settle_timeout_s, fps=fps
+            keys=ARM_POS_KEYS, tolerance=settle_tolerance, timeout_s=settle_timeout_s
         )
         self._state: dict[str, float] = {}
         self._obs_ts_us = 0
@@ -100,6 +100,14 @@ class PolicyRunner:
 
     def request_stop(self) -> None:
         self._stop.set()
+
+    def _replan_pending(self) -> bool:
+        """True when the next ``select_action`` runs the model instead of popping.
+
+        MolmoAct2 buffers a 30-step chunk in ``_action_queue`` and only replans
+        once it drains (empty also before the first plan).
+        """
+        return not getattr(self._policy, "_action_queue", None)
 
     @torch.inference_mode()
     def _infer(self, state_vec: np.ndarray, images: dict[str, np.ndarray], task: str) -> torch.Tensor:
@@ -145,12 +153,11 @@ class PolicyRunner:
                 if not self._ready:
                     continue
 
-                # Wait for the arm to reach the last action before inferencing on
-                # the (now stationary) observation.
-                await self._settle.wait(lambda: self._state, self._stop)
-                if self._stop.is_set():
-                    reason = "stopped"
-                    break
+                # Gate the replan boundary only: a fresh chunk must be planned
+                # from an observation the arm has caught up to, but the 29
+                # mid-chunk pops are just dequeues and run at full fps.
+                if self._replan_pending() and not self._settle.ready(self._state):
+                    continue
 
                 obs_ts = self._obs_ts_us
                 state_vec = np.array([self._state[key] for key in ARM_POS_KEYS], dtype=np.float32)
