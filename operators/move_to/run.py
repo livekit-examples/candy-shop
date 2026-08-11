@@ -16,6 +16,7 @@ import pathlib
 from livekit.portal import Operator, OperatorConfig, RpcError, RpcInvocationData
 
 from shared.common import env_str, load_env, mint_token, required_env
+from shared.config import FPS
 
 from operators.move_to import config
 from operators.move_to.servo import SliderServo
@@ -68,7 +69,7 @@ async def main() -> None:
 
     cfg = OperatorConfig.from_yaml_file(CONFIG_PATH, room)
     op = Operator(cfg)
-    servo = SliderServo(op, fps=cfg.fps, safe_zone=safe_zone, detector=detector)
+    servo = SliderServo(op, fps=FPS, safe_zone=safe_zone, detector=detector)
 
     async def move_to(data: RpcInvocationData) -> str:
         logger.info("[move-to] move_to RPC from '%s'", data.caller_identity)

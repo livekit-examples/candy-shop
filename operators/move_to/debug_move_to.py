@@ -29,6 +29,7 @@ import numpy as np
 from livekit.portal import Operator, OperatorConfig
 
 from shared.common import env_str, load_env, mint_token, pace, required_env
+from shared.config import FPS
 
 from operators.move_to import config
 from operators.move_to.servo import SliderServo
@@ -212,8 +213,8 @@ async def main() -> None:
 
     cfg = OperatorConfig.from_yaml_file(CONFIG_PATH, room)
     op = Operator(cfg)
-    servo = SliderServo(op, fps=cfg.fps, safe_zone=safe_zone, detector=detector)
-    session = DebugSession(op, servo, safe_zone, cfg.fps)
+    servo = SliderServo(op, fps=FPS, safe_zone=safe_zone, detector=detector)
+    session = DebugSession(op, servo, safe_zone, FPS)
 
     logger.info("[debug] connecting to %s as '%s' in room '%s' ...", url, IDENTITY, room)
     await op.connect(url, token)

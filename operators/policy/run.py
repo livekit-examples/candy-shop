@@ -24,6 +24,7 @@ from lerobot.policies.utils import prepare_observation_for_inference
 from lerobot.utils.constants import OBS_STATE
 
 from shared.common import env_str, load_env, mint_token, pace, required_env
+from shared.config import FPS
 from shared.rest_pose import ARM_POS_KEYS, SLIDER_VEL_KEY
 
 from operators.policy.molmoact import ACTION_NAMES, DEFAULT_CHECKPOINT, resolve_image_keys
@@ -233,7 +234,7 @@ async def main() -> None:
     cfg = OperatorConfig.from_yaml_file(CONFIG_PATH, room)
     op = Operator(cfg)
     runner = PolicyRunner(
-        op, fps=cfg.fps, device=args.device, duration_s=args.duration,
+        op, fps=FPS, device=args.device, duration_s=args.duration,
         policy=policy, preprocessor=preprocessor, postprocessor=postprocessor,
         camera_for_key=camera_for_key,
         settle_tolerance=args.settle_tolerance, settle_timeout_s=args.settle_timeout,
