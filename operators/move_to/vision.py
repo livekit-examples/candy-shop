@@ -13,6 +13,8 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from operators.move_to import config
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_SAFE_ZONE = pathlib.Path(__file__).resolve().parent / "safe_zone.yaml"
@@ -26,19 +28,59 @@ class MarkerDetection:
     corners: np.ndarray  # (4, 2) pixel corners
 
 
+def _gamma_lut(gamma: float) -> np.ndarray:
+    """256-entry map for `gray = 255 * (gray/255) ** gamma`."""
+    return np.clip(
+        ((np.arange(256) / 255.0) ** gamma) * 255.0, 0, 255
+    ).astype(np.uint8)
+
+
 class ArucoDetector:
+    """ArUco detection tuned for uneven lighting (see `config`).
+
+    Three departures from stock OpenCV: a gamma LUT lifts the shadows, CLAHE
+    equalizes local contrast, and the adaptive-threshold window sweep is wider and
+    finer than the default, which assumes an evenly lit marker.
+    """
+
     def __init__(self, dictionary: str, marker_id: int | None):
         aruco = cv2.aruco
         dict_id = getattr(aruco, dictionary, None)
         if dict_id is None:
             raise ValueError(f"unknown ArUco dictionary {dictionary!r}")
-        self._detector = aruco.ArucoDetector(
-            aruco.getPredefinedDictionary(dict_id), aruco.DetectorParameters()
-        )
+
+        params = aruco.DetectorParameters()
+        params.adaptiveThreshWinSizeMin = config.ADAPTIVE_THRESH_WIN_MIN
+        params.adaptiveThreshWinSizeMax = config.ADAPTIVE_THRESH_WIN_MAX
+        params.adaptiveThreshWinSizeStep = config.ADAPTIVE_THRESH_WIN_STEP
+        params.minMarkerPerimeterRate = config.MIN_MARKER_PERIMETER_RATE
+        if config.CORNER_REFINE_SUBPIX:
+            params.cornerRefinementMethod = aruco.CORNER_REFINE_SUBPIX
+
+        self._detector = aruco.ArucoDetector(aruco.getPredefinedDictionary(dict_id), params)
         self.marker_id = marker_id
+        self._gamma = _gamma_lut(config.GAMMA) if config.GAMMA != 1.0 else None
+        self._clahe = (
+            cv2.createCLAHE(
+                clipLimit=config.CLAHE_CLIP_LIMIT,
+                tileGridSize=(config.CLAHE_TILE_GRID, config.CLAHE_TILE_GRID),
+            )
+            if config.CLAHE_ENABLED
+            else None
+        )
+
+    def enhance(self, frame_rgb: np.ndarray) -> np.ndarray:
+        """The grayscale the detector actually sees. Public so the debug tool can
+        show it — tuning gamma/CLAHE blind is guesswork."""
+        gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
+        if self._gamma is not None:
+            gray = cv2.LUT(gray, self._gamma)
+        if self._clahe is not None:
+            gray = self._clahe.apply(gray)
+        return gray
 
     def detect(self, frame_rgb: np.ndarray) -> Optional[MarkerDetection]:
-        gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
+        gray = self.enhance(frame_rgb)
         corners, ids, _ = self._detector.detectMarkers(gray)
         if ids is None or len(ids) == 0:
             return None
@@ -111,8 +153,6 @@ def load_safe_zone(path: Optional[pathlib.Path] = None) -> SafeZone:
         raise SystemExit(
             f"no safe zone at {path}; run calibrate.py to click the two lines first."
         )
-    from operators.move_to import config
-
     if sz.axis != config.AXIS:
         logger.warning(
             "[move-to] safe_zone axis %r != config.AXIS %r; re-run calibrate.py",
