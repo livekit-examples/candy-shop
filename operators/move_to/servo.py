@@ -145,14 +145,7 @@ class SliderServo:
             self.send(0.0)
 
     def request_stop(self) -> None:
-        """Preempt the move in flight; the loop unwinds within a tick.
-
-        Same shape as the policy and reward operators' `request_stop`. Setting the
-        event is all this does — `servo_to`'s `finally` is what actually zeroes the
-        carriage and releases control, so a stop takes the identical exit path as a
-        timeout or a converged move. Safe to call when nothing is running: the flag
-        is cleared on entry to the next `servo_to`, so it can't leak into it.
-        """
+        """Preempt the move in flight; `servo_to`'s finally does the actual cleanup."""
         self._stop.set()
 
     async def claim(self) -> None:
@@ -244,9 +237,8 @@ class SliderServo:
         await self.claim()
         logger.info("[move-to] %s: active operator -> %s", label, self._op.local_identity())
 
-        # Discard any stop that arrived while nothing was moving, so it can't abort
-        # the move we're about to start (the agent's chain issues back-to-back
-        # move_to calls, and a late stop from the previous one would kill the next).
+        # A stop that arrived between moves must not abort this one; the agent issues
+        # back-to-back move_to calls.
         self._stop.clear()
         self.reset_tracking()
         reached = False
@@ -267,7 +259,7 @@ class SliderServo:
                 now = time.monotonic()
                 dt = now - last_t
                 last_t = now
-                # Checked first: a stop must win over every other exit condition.
+                # First: a stop wins over every other exit condition.
                 if self._stop.is_set():
                     reason = "stopped"
                     break

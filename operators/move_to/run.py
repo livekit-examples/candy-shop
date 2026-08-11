@@ -84,12 +84,9 @@ async def main() -> None:
         return json.dumps({"requested": requested, "capped": target != requested, **outcome})
 
     async def stop(data: RpcInvocationData) -> str:
-        """Preempt the move in flight (stops the carriage and releases control).
+        """Preempt the move in flight: halts the travel, leaves the arm where it is.
 
-        The carriage is the positioner's to move, so halting it belongs here rather
-        than on the robot's `reset_to_zero_position` — that one is the heavier
-        cancel-anything path and folds the arm as well. This leaves the arm where it
-        is and only kills the travel.
+        Unlike the robot's `reset_to_zero_position`, which also folds the arm.
         """
         logger.info("[move-to] stop RPC from '%s'", data.caller_identity)
         servo.request_stop()

@@ -23,12 +23,8 @@ logger = logging.getLogger("agent")
 class GiveCandy(AgentTask[bool]):
     """Picks one candy off the shelf and drops it in the drop zone. Awaiting yields success/failure.
 
-    The errand is a fixed four-step chain (shelf → pick → drop zone → release), and
-    each step is a blocking RPC that can take tens of seconds. It runs in a
-    **background task** rather than inline in `on_enter`, for one reason: `stop`
-    needs something it can cancel. Awaiting the chain inside `on_enter` would hold
-    the task open for the whole errand with no way to interrupt it — the customer
-    could say "stop" and be heard, but nothing could act on it.
+    The chain runs as a background task, not inline in `on_enter`, so that `stop`
+    has something it can cancel.
     """
 
     def __init__(self, room: rtc.Room, candy_name: str, chat_ctx=None) -> None:
@@ -80,8 +76,7 @@ class GiveCandy(AgentTask[bool]):
             self.session.say("And here you go!")
             await self._run_task(f"Drop {self.candy_name}")
         except asyncio.CancelledError:
-            # `stop` cancelled us. Teardown is the canceller's job (it can await
-            # cleanly; we're mid-cancellation), so just unwind.
+            # Teardown is the canceller's job — it can await cleanly.
             raise
         except Exception:
             logger.exception("failed to give candy: %s", self.candy_name)
@@ -103,16 +98,10 @@ class GiveCandy(AgentTask[bool]):
             await self._teardown()
 
     async def _teardown(self) -> None:
-        """Preempt whoever is driving, then park the arm.
+        """Stop the operators, then park the arm.
 
-        Order matters. `reset_to_zero_position` self-claims the robot as active
-        operator, which neutralizes the current driver — but an operator whose run
-        loop is still alive would simply re-claim and carry on, so the operators are
-        stopped first. The three stops are independent, so they go out together.
-
-        The policy is included even though stopping the reward operator already
-        cascades to it — see POLICY_IDENTITY in config for the two cases where that
-        cascade doesn't happen, and why a redundant stop is safe.
+        Order matters: `reset_to_zero_position` self-claims the robot, but an operator
+        whose run loop is still alive would just re-claim and carry on.
         """
         await asyncio.gather(
             self._rpc(REWARD_IDENTITY, "stop"),

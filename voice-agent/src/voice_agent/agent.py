@@ -89,8 +89,7 @@ class CandyShopAssistant(Agent):
         )
         if succeeded:
             return f"Handed the {candy_name} to the user."
-        # Deliberately doesn't claim a cause: this is also the path a customer's
-        # "stop" takes, and the stop tool has already said what happened.
+        # No cause claimed: a customer's "stop" takes this path too.
         return f"The {candy_name} was not delivered."
 
     @function_tool()
