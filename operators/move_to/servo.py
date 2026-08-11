@@ -4,6 +4,7 @@ The control law is a sqrt decel profile, not a PID — see `config`.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import time
@@ -53,6 +54,7 @@ class SliderServo:
         self._tracked_frame_t: float | None = None  # ... and when track() consumed it
         self._last_marker: Optional[MarkerDetection] = None
         self._last_estimate: Optional[Estimate] = None
+        self._stop = asyncio.Event()
         op.on_observation(self._on_observation)
 
     def _on_observation(self, obs: Observation) -> None:
@@ -141,6 +143,17 @@ class SliderServo:
     def send_stop(self) -> None:
         if self.has_state:
             self.send(0.0)
+
+    def request_stop(self) -> None:
+        """Preempt the move in flight; the loop unwinds within a tick.
+
+        Same shape as the policy and reward operators' `request_stop`. Setting the
+        event is all this does — `servo_to`'s `finally` is what actually zeroes the
+        carriage and releases control, so a stop takes the identical exit path as a
+        timeout or a converged move. Safe to call when nothing is running: the flag
+        is cleared on entry to the next `servo_to`, so it can't leak into it.
+        """
+        self._stop.set()
 
     async def claim(self) -> None:
         await self._op.set_active_operator(self._op.local_identity())
@@ -231,6 +244,10 @@ class SliderServo:
         await self.claim()
         logger.info("[move-to] %s: active operator -> %s", label, self._op.local_identity())
 
+        # Discard any stop that arrived while nothing was moving, so it can't abort
+        # the move we're about to start (the agent's chain issues back-to-back
+        # move_to calls, and a late stop from the previous one would kill the next).
+        self._stop.clear()
         self.reset_tracking()
         reached = False
         reason = "timeout"
@@ -250,6 +267,10 @@ class SliderServo:
                 now = time.monotonic()
                 dt = now - last_t
                 last_t = now
+                # Checked first: a stop must win over every other exit condition.
+                if self._stop.is_set():
+                    reason = "stopped"
+                    break
                 if now - t0 > config.TIMEOUT_S:
                     reason = "timeout"
                     break
