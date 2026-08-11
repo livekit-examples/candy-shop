@@ -12,6 +12,7 @@ import logging
 import os
 import pathlib
 import time
+from typing import Callable
 
 import numpy as np
 import torch
@@ -64,7 +65,8 @@ class PolicyRunner:
                  policy, preprocessor, postprocessor, camera_for_key: dict[str, str],
                  settle_tolerance: float, settle_timeout_s: float,
                  start_pose: dict[str, float] | None = None, start_ramp_s: float = 2.0,
-                 start_tolerance: float = 3.0) -> None:
+                 start_tolerance: float = 3.0,
+                 on_tick: Callable[[dict], None] | None = None) -> None:
         self._op = op
         self._fps = fps
         self._device = torch.device(device)
@@ -82,6 +84,8 @@ class PolicyRunner:
         self._start_pose = start_pose
         self._start_ramp_s = start_ramp_s
         self._start_tolerance = start_tolerance
+        self._task = ""
+        self._on_tick = on_tick  # per-tick telemetry for the debug driver
         self._stop = asyncio.Event()
         op.on_observation(self._on_observation)
 
@@ -94,14 +98,18 @@ class PolicyRunner:
                 self._frames[name] = frame_bytes_to_numpy_rgb(frame.data, frame.width, frame.height)
 
     @property
-    def _ready(self) -> bool:
+    def ready(self) -> bool:
         have_state = all(key in self._state for key in ARM_POS_KEYS)
         have_frames = all(cam in self._frames for cam in self._camera_for_key.values())
         return have_state and have_frames
 
     def require_ready(self) -> None:
-        if not self._ready:
+        if not self.ready:
             raise RpcError.Error(code=1409, message="no robot state/frames yet", data=None)
+
+    def set_task(self, task: str) -> None:
+        """Swap the instruction; a run in flight picks it up on its next tick."""
+        self._task = task
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -171,6 +179,7 @@ class PolicyRunner:
 
     async def pick(self, task: str) -> dict:
         """Run the policy until done/timeout/stop, holding the slider still."""
+        self._task = task
         self._stop.clear()
         self._settle.reset()
         await self._op.set_active_operator(self._op.local_identity())
@@ -199,13 +208,14 @@ class PolicyRunner:
                 if self._duration_s > 0 and time.monotonic() - t0 > self._duration_s:
                     reason = "duration"
                     break
-                if not self._ready:
+                if not self.ready:
                     continue
 
                 # Gate the replan boundary only: a fresh chunk must be planned
                 # from an observation the arm has caught up to, but the 29
                 # mid-chunk pops are just dequeues and run at full fps.
-                if self._replan_pending() and not self._settle.ready(self._state):
+                replan = self._replan_pending()
+                if replan and not self._settle.ready(self._state):
                     continue
 
                 obs_ts = self._obs_ts_us
@@ -214,13 +224,18 @@ class PolicyRunner:
 
                 # Inference is heavy and synchronous; run it off the event loop so
                 # Portal keeps delivering fresh observations between ticks.
-                action = await loop.run_in_executor(None, self._infer, state_vec, images, task)
+                t_infer = time.monotonic()
+                action = await loop.run_in_executor(None, self._infer, state_vec, images, self._task)
+                infer_ms = (time.monotonic() - t_infer) * 1000.0
 
                 cmd = {name: float(action[i]) for i, name in enumerate(ACTION_NAMES)}
                 cmd[SLIDER_VEL_KEY] = 0.0  # the slider is the move_to operator's job
                 self._op.send_action(cmd, timestamp_us=_now_us(), in_reply_to_ts_us=obs_ts)
                 self._settle.record(cmd)
                 ticks += 1
+                if self._on_tick is not None:
+                    self._on_tick({"tick": ticks, "infer_ms": infer_ms, "replan": replan,
+                                   "cmd": cmd, "state": dict(self._state)})
         finally:
             if all(key in self._state for key in ARM_POS_KEYS):
                 self._send_arm(0.0)
@@ -228,7 +243,7 @@ class PolicyRunner:
 
         elapsed = time.monotonic() - t0
         logger.info("[policy] pick done: reason=%s ticks=%d elapsed=%.2fs", reason, ticks, elapsed)
-        return {"task": task, "reason": reason, "ticks": ticks, "elapsed_s": elapsed}
+        return {"task": self._task, "reason": reason, "ticks": ticks, "elapsed_s": elapsed}
 
 
 def _load_policy(checkpoint: str, device: str, inference_action_mode: str):
@@ -264,8 +279,8 @@ def parse_start_pose(raw: str) -> dict[str, float] | None:
     return {key: float(part) for key, part in zip(ARM_POS_KEYS, parts)}
 
 
-async def main() -> None:
-    parser = argparse.ArgumentParser(description="Serve MolmoAct2 as a candy-shop picker operator.")
+def add_policy_args(parser: argparse.ArgumentParser) -> None:
+    """The checkpoint/inference knobs, shared with the debug driver."""
     parser.add_argument("--checkpoint", default=env_str("POLICY_CHECKPOINT", DEFAULT_CHECKPOINT))
     parser.add_argument("--task", default=env_str("POLICY_TASK", "pick up the candy"))
     parser.add_argument("--device", default=env_str("POLICY_DEVICE", "cuda" if torch.cuda.is_available() else "cpu"))
@@ -283,18 +298,11 @@ async def main() -> None:
                         help="Seconds to ease into the start pose (it can be 60+ units away).")
     parser.add_argument("--start-tolerance", type=float, default=float(env_str("POLICY_START_TOLERANCE", "3.0")),
                         help="Max per-joint error to call the start pose reached.")
-    args = parser.parse_args()
 
-    logging.basicConfig(
-        level=os.environ.get("LOG_LEVEL", "INFO").upper(),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    load_env(pathlib.Path(__file__).resolve().parent)
 
-    url = required_env("LIVEKIT_URL")
-    room = env_str("LIVEKIT_ROOM", "candy-shop")
-    token = mint_token(IDENTITY, room)
-
+def build_runner(op: Operator, args: argparse.Namespace,
+                 on_tick: Callable[[dict], None] | None = None) -> PolicyRunner:
+    """Load the checkpoint, map cameras onto its image keys, and wire a runner onto `op`."""
     policy, preprocessor, postprocessor = _load_policy(
         args.checkpoint, args.device, args.inference_action_mode
     )
@@ -308,16 +316,35 @@ async def main() -> None:
     camera_for_key = {key: physical[i] for i, key in enumerate(image_keys)}
     logger.info("[policy] image mapping: %s", camera_for_key)
 
-    cfg = OperatorConfig.from_yaml_file(CONFIG_PATH, room)
-    op = Operator(cfg)
-    runner = PolicyRunner(
+    return PolicyRunner(
         op, fps=FPS, device=args.device, duration_s=args.duration,
         policy=policy, preprocessor=preprocessor, postprocessor=postprocessor,
         camera_for_key=camera_for_key,
         settle_tolerance=args.settle_tolerance, settle_timeout_s=args.settle_timeout,
         start_pose=parse_start_pose(args.start_pose), start_ramp_s=args.start_ramp,
         start_tolerance=args.start_tolerance,
+        on_tick=on_tick,
     )
+
+
+async def main() -> None:
+    parser = argparse.ArgumentParser(description="Serve MolmoAct2 as a candy-shop picker operator.")
+    add_policy_args(parser)
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    load_env(pathlib.Path(__file__).resolve().parent)
+
+    url = required_env("LIVEKIT_URL")
+    room = env_str("LIVEKIT_ROOM", "candy-shop")
+    token = mint_token(IDENTITY, room)
+
+    cfg = OperatorConfig.from_yaml_file(CONFIG_PATH, room)
+    op = Operator(cfg)
+    runner = build_runner(op, args)
 
     async def run_policy(data: RpcInvocationData) -> str:
         """Run the policy for one order. Payload: task string or {"task": ...}."""
