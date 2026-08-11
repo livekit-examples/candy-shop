@@ -126,7 +126,7 @@ frame-to-frame flow drifts with no absolute reference where the encoder doesn't.
 | `config.py`      | tuning constants: profile, deadzone, max velocity, marker id, … |
 | `vision.py`      | `ArucoDetector` (marker → pixel center), `AxisEstimator` (ArUco + slider dead reckoning), `SafeZone` (pos 0..100 ↔ image coord) |
 | `servo.py`       | `SliderServo` — claims control, runs the track→profile→`slider.vel` loop |
-| `run.py`         | operator entry point: wires the `move_to` RPC |
+| `run.py`         | operator entry point: wires the `move_to` + `stop` RPCs |
 | `calibrate.py`   | 2-click safe-zone tool → writes `safe_zone.yaml` |
 | `debug_move_to.py` | live tool: click a target, tune the profile by eye |
 
@@ -151,6 +151,7 @@ await room.local_participant.perform_rpc(
 | `lost` | marker gone past the coast + re-acquire window; slider stopped |
 | `no_frames` | observations stopped arriving; stopped without moving blind |
 | `timeout` | `TIMEOUT_S` elapsed (also covers "never saw the marker at all") |
+| `stopped` | a `stop` RPC arrived mid-move |
 
 `coasted_ticks` counts ticks driven on dead reckoning rather than a live
 detection; `creep_ticks` counts ticks driven fully blind. Persistently nonzero
@@ -158,9 +159,30 @@ means the lighting wants attention.
 
 Errors: `1400` empty/non-numeric payload, `1409` no robot state yet.
 
-Parking the rig is not here — the robot's own `reset_to_zero_position`
-(`robot/run.py`) folds the arm and stops the slider, and doubles as the
-preempt-anything cancel path.
+## RPC: `stop() -> JSON`
+
+Preempts the move in flight. The carriage is the positioner's to move, so halting
+it belongs here rather than on the robot's heavier cancel path.
+
+```python
+await room.local_participant.perform_rpc(
+    destination_identity="move-to-operator", method="stop", payload="")
+# -> {"stopped": true}
+```
+
+Sets a flag the servo loop checks first on each tick, so the move exits through
+the same path as a timeout or a converged move — carriage zeroed, control
+released — and returns `reason: "stopped"` to whoever called `move_to`. Returns
+immediately; it does not wait for the loop to unwind.
+
+Safe to send when nothing is moving: the flag is cleared on entry to each
+`move_to`, so a stop that lands between two moves can't abort the next one. That
+matters because the voice agent issues back-to-back `move_to` calls.
+
+Parking the rig is still not here — the robot's own `reset_to_zero_position`
+(`robot/run.py`) folds the arm *and* stops the slider, and doubles as the
+preempt-anything cancel path. Use `stop` to halt the travel and leave the arm
+where it is; use the robot's reset to put everything back at rest.
 
 ## Setup
 

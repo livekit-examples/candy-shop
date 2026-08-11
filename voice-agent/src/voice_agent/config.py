@@ -7,6 +7,13 @@ MOVE_TO_IDENTITY = "move-to-operator"
 # The reward operator wraps the policy: its run_task drives the policy and watches
 # SARM for completion, so the agent talks to it rather than the policy directly.
 REWARD_IDENTITY = "reward-operator"
+# Only ever used for teardown, never to start work. Stopping the reward operator
+# already cascades to the policy (its run_task `finally` RPCs the policy's stop),
+# so this is belt-and-braces for the two cases that cascade misses: the policy was
+# started directly from the Playground console, bypassing the reward operator, or
+# the reward operator died after starting it. Safe to send while the policy is
+# idle — `pick()` clears its stop flag on entry, so it can't leak into the next run.
+POLICY_IDENTITY = "policy-operator"
 RPC_TIMEOUT_S = 10.0
 # run_task caps a task at the reward operator's 30s safety timeout, then still has
 # to stop the policy and unwind; give the RPC a little headroom over that 30s so it
