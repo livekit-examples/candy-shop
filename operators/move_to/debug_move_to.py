@@ -1,13 +1,19 @@
 """Standalone debug driver for the visual servo: drive the slider directly and
-tune the PID by eye. Its own operator ("move-to-debug"); does NOT call the RPC.
+tune the approach profile by eye. Its own operator ("move-to-debug"); does NOT
+call the RPC.
 
 Controls (all in the window):
 
     L-click     set the target to the clicked height
     Up/Down     target +/- 5    Left/Right  target +/- 1
-    [ / ]       kp  -/+          ; / '       ki  -/+        , / .   kd  -/+
+    [ / ]       APPROACH_FULL_SPEED_PX -/+   (lower = brake later = arrives hotter)
+    ; / '       MIN_VELOCITY -/+             (breakaway floor)
+    , / .       DEADZONE_PX -/+              (placement tolerance)
     space       hold (target = current marker position)
     q / Esc     quit
+
+Watch the last inch: if it overshoots and hunts, raise APPROACH_FULL_SPEED_PX or
+widen DEADZONE_PX. Copy what you settle on into config.py.
 
 Only run ONE thing that takes active-operator control at a time.
 
@@ -96,7 +102,6 @@ class DebugSession:
         self._servo = servo
         self._safe_zone = safe_zone
         self._fps = fps
-        self._pid = servo.new_pid()
         self.running = True
         self.target_pos = 50.0
         self.status = "connecting ..."
@@ -104,14 +109,16 @@ class DebugSession:
     def _bump_target(self, delta: float) -> None:
         self.target_pos = self._safe_zone.clamp_pos(self.target_pos + delta)
 
-    def _bump_gain(self, name: str, delta: float) -> None:
-        setattr(self._pid, name, round(max(0.0, getattr(self._pid, name) + delta), 3))
-        logger.info("[debug] kp=%.3f ki=%.3f kd=%.3f",
-                    self._pid.kp, self._pid.ki, self._pid.kd)
+    def _bump_knob(self, name: str, delta: float) -> None:
+        """Live-edit a `config` constant; `velocity_for` reads it every tick."""
+        setattr(config, name, round(max(0.0, getattr(config, name) + delta), 3))
+        logger.info("[debug] approach=%.1fpx min_vel=%.0f deadzone=%.1fpx",
+                    config.APPROACH_FULL_SPEED_PX, config.MIN_VELOCITY, config.DEADZONE_PX)
 
     async def control_loop(self) -> None:
         await self._servo.claim()
         logger.info("[debug] active operator -> %s", self._op.local_identity())
+        self._servo.reset_tracking()
         last_t = time.monotonic()
         try:
             async for _ in pace(self._fps):
@@ -123,18 +130,22 @@ class DebugSession:
                 if not self._servo.has_state or self._servo.frame is None:
                     self.status = "waiting for robot state/frame ..."
                     continue
-                marker = self._servo.marker()
-                if marker is None:
-                    self._pid.reset()
+                est = self._servo.track(dt)
+                if not est.usable:
                     self._servo.send_stop()
-                    self.status = f"no marker | target={self.target_pos:.0f}"
+                    self.status = (
+                        f"no marker ({'coast expired' if est.calibrated else 'gain unfitted'}) "
+                        f"| target={self.target_pos:.0f}"
+                    )
                     continue
-                vel, err = self._servo.velocity_for(self.target_pos, marker, self._pid, dt)
+                vel, err = self._servo.velocity_for(self.target_pos, est.coord)
                 self._servo.send(vel)
+                source = "cam" if est.measured else f"coast {est.age_s:.2f}s"
                 self.status = (
-                    f"pos={self._servo.current_pos(marker):.0f} -> {self.target_pos:.0f}  "
-                    f"err={err:+.0f}px vel={vel:+.0f}  "
-                    f"kp={self._pid.kp:.2f} ki={self._pid.ki:.2f} kd={self._pid.kd:.2f}"
+                    f"pos={self._servo.pos_of(est.coord):.0f} -> {self.target_pos:.0f}  "
+                    f"err={err:+.0f}px vel={vel:+.0f}  [{source}]  "
+                    f"approach={config.APPROACH_FULL_SPEED_PX:.0f} "
+                    f"min={config.MIN_VELOCITY:.0f} dead={config.DEADZONE_PX:.0f}"
                 )
         finally:
             self._servo.send_stop()
@@ -160,9 +171,10 @@ class DebugSession:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 220, 255), 2, cv2.LINE_AA)
                 cv2.imshow(WINDOW, canvas)
             else:
-                marker = self._servo.marker()
+                # Draw what the control loop actually saw; don't re-detect here.
                 cv2.imshow(WINDOW, _draw_overlay(
-                    frame, self._safe_zone, marker, self.target_pos, self.status))
+                    frame, self._safe_zone, self._servo.last_marker,
+                    self.target_pos, self.status))
 
             keycode = cv2.waitKeyEx(1)
             key = keycode & 0xFF
@@ -175,21 +187,21 @@ class DebugSession:
             elif keycode in _ARROW_LEFT:
                 self._bump_target(-1)
             elif key == ord("]"):
-                self._bump_gain("kp", 0.5)
+                self._bump_knob("APPROACH_FULL_SPEED_PX", 5.0)
             elif key == ord("["):
-                self._bump_gain("kp", -0.5)
+                self._bump_knob("APPROACH_FULL_SPEED_PX", -5.0)
             elif key == ord("'"):
-                self._bump_gain("ki", 0.1)
+                self._bump_knob("MIN_VELOCITY", 25.0)
             elif key == ord(";"):
-                self._bump_gain("ki", -0.1)
+                self._bump_knob("MIN_VELOCITY", -25.0)
             elif key == ord("."):
-                self._bump_gain("kd", 0.1)
+                self._bump_knob("DEADZONE_PX", 1.0)
             elif key == ord(","):
-                self._bump_gain("kd", -0.1)
+                self._bump_knob("DEADZONE_PX", -1.0)
             elif key == ord(" "):
-                marker = self._servo.marker()
-                if marker is not None:
-                    self.target_pos = self._servo.current_pos(marker)
+                est = self._servo.last_estimate
+                if est is not None and est.coord is not None:
+                    self.target_pos = self._servo.pos_of(est.coord)
                     logger.info("[debug] hold at pos=%.1f", self.target_pos)
             elif key in (ord("q"), 27):
                 self.running = False
