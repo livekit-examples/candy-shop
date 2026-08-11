@@ -13,6 +13,7 @@ carriage).
 | `settle.py`   | `SettleGate` — wait for the arm to reach the last command before re-inferencing |
 | `train.py`    | fine-tune MolmoAct2 on a leslider dataset (`policy-train`) |
 | `run.py`      | operator entry point: loads a checkpoint and serves the `run_policy` RPC (`policy`) |
+| `debug_policy.py` | interactive terminal driver: start/stop the policy and retype the prompt (`policy-debug`) |
 
 ## Why `slider.vel` is dropped
 
@@ -41,6 +42,27 @@ uv run policy                                              # default SO-101 chec
 uv run policy --checkpoint outputs/molmoact2-candy/pretrained_model   # your fine-tune
 uv run policy --task "pick up the blue candy" --duration 20
 ```
+
+## Debugging by hand (`policy-debug`)
+
+Loads the same checkpoint into its own operator (`policy-debug`) and drives it
+from the terminal — no `run_policy` RPC, no reward operator, no voice agent.
+Takes the same flags as `policy`; `--duration` defaults to "run until stopped".
+
+```bash
+uv run policy-debug --checkpoint outputs/molmoact2-candy/pretrained_model
+```
+
+```
+policy> start pick up the red candy   # start (retyping the instruction first)
+policy> prompt pick up the blue one   # swap it mid-run: the next tick inferences on it
+policy> stop                          # preempt, release active control
+policy> <enter>                       # toggle start/stop
+policy> status | quit
+```
+
+Only run **one** thing that takes active-operator control at a time: don't run
+`uv run policy` against the same room while debugging.
 
 **Start pose:** every pick begins by easing the arm into an in-distribution pose,
 so the first chunk is planned from a state the checkpoint recognizes. The
