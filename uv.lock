@@ -665,7 +665,7 @@ molmoact2 = [
 [[package]]
 name = "lerobot-robot-so101-slider"
 version = "0.1.0"
-source = { git = "https://github.com/pham-tuan-binh/leslider?subdirectory=packages%2Flerobot_robot_so101_slider#8ec038b28154cc4878b9d2b92bf27962a82faf9b" }
+source = { git = "https://github.com/pham-tuan-binh/leslider?subdirectory=packages%2Flerobot_robot_so101_slider#a7c5c86669f7452e60e764f14ab0bff406213e3d" }
 dependencies = [
     { name = "lerobot", extra = ["feetech"] },
 ]
@@ -673,7 +673,7 @@ dependencies = [
 [[package]]
 name = "lerobot-teleoperator-so101-with-slider"
 version = "0.1.0"
-source = { git = "https://github.com/pham-tuan-binh/leslider?subdirectory=packages%2Flerobot_teleoperator_so101_with_slider#8ec038b28154cc4878b9d2b92bf27962a82faf9b" }
+source = { git = "https://github.com/pham-tuan-binh/leslider?subdirectory=packages%2Flerobot_teleoperator_so101_with_slider#a7c5c86669f7452e60e764f14ab0bff406213e3d" }
 dependencies = [
     { name = "lerobot", extra = ["feetech"] },
     { name = "pynput" },
