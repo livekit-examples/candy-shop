@@ -25,6 +25,25 @@ DEFAULT_CHECKPOINT = "lerobot/MolmoAct2-SO100_101-LeRobot"
 # The six arm .pos MolmoAct2 controls, in load-bearing wire order.
 ACTION_NAMES: tuple[str, ...] = ARM_POS_KEYS
 
+# Pose the arm is driven to before the first plan, in wire units.
+#
+# The checkpoint normalizes state against its own q01/q99 quantiles and then
+# *clamps*, so a joint outside that range reaches the model pinned at a bin
+# boundary. Parked in the folded rest pose this rig saturates four of six dims
+# (shoulder_lift, elbow_flex, wrist_roll, gripper) and the policy plans nothing:
+# measured on real rig frames, a saturated start yields ~6 units of motion per
+# chunk versus ~96 from an in-range start on the *same* images. These values are
+# a mid-episode state from the checkpoint's own training distribution
+# (Beegbrain/pick_lemon_and_drop_in_bowl), mapped back through the joint bridge.
+START_POSE: dict[str, float] = {
+    "shoulder_pan.pos":   -1.6,
+    "shoulder_lift.pos": -42.9,
+    "elbow_flex.pos":     23.5,
+    "wrist_flex.pos":     84.6,
+    "wrist_roll.pos":     -9.7,
+    "gripper.pos":         1.1,
+}
+
 
 def _keep_indices(names: list[str]) -> list[int]:
     """Indices of the columns we keep — everything that is not a ``.vel`` field."""

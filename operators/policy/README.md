@@ -42,6 +42,17 @@ uv run policy --checkpoint outputs/molmoact2-candy/pretrained_model   # your fin
 uv run policy --task "pick up the blue candy" --duration 20
 ```
 
+**Start pose:** every pick begins by easing the arm into an in-distribution pose,
+so the first chunk is planned from a state the checkpoint recognizes. The
+checkpoint normalizes state against its own q01/q99 quantiles and then *clamps*,
+and parked in the folded rest pose this rig saturates four of six joints
+(`shoulder_lift`, `elbow_flex`, `wrist_roll`, `gripper`) — measured on real rig
+frames, a saturated start plans ~6 units of motion per chunk versus ~96 from an
+in-range start on the *same* images. `--start-pose` takes `auto` (the default,
+`START_POSE` in `molmoact.py`), `none` to skip priming, or six comma-separated
+wire values; `--start-ramp` (2 s) sets how gently it eases in, since the target
+can be 60+ units away.
+
 **Settle gate:** MolmoAct2 emits 30-step chunks — `select_action` pops one step
 per tick and only runs the model when the chunk drains. The gate sits at that
 **replan boundary**: a fresh chunk is planned from a single observation, so the
@@ -90,5 +101,6 @@ You also need a robot process (`uv run robot`) and, for a real order, a
 `POLICY_CHECKPOINT`, `POLICY_TASK`, `POLICY_DEVICE`, `POLICY_DURATION_S`,
 `POLICY_INFERENCE_ACTION_MODE` (`continuous`), `POLICY_PRIMARY_CAMERA`
 (`overhead_camera`), `POLICY_WRIST_CAMERA` (`arm_camera`),
-`POLICY_SETTLE_TOLERANCE` (`2.0`), `POLICY_SETTLE_TIMEOUT_S` (`2.0`), plus the
-shared `LIVEKIT_*`.
+`POLICY_SETTLE_TOLERANCE` (`2.0`), `POLICY_SETTLE_TIMEOUT_S` (`2.0`),
+`POLICY_START_POSE` (`auto`), `POLICY_START_RAMP_S` (`2.0`),
+`POLICY_START_TOLERANCE` (`3.0`), plus the shared `LIVEKIT_*`.
