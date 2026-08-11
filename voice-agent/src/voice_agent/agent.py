@@ -89,7 +89,8 @@ class CandyShopAssistant(Agent):
         )
         if succeeded:
             return f"Handed the {candy_name} to the user."
-        return f"Something went wrong giving the {candy_name}."
+        # No cause claimed: a customer's "stop" takes this path too.
+        return f"The {candy_name} was not delivered."
 
     @function_tool()
     async def look(self, context: RunContext) -> str:

@@ -21,6 +21,7 @@ from livekit.portal import (
 )
 
 from shared.common import env_str, load_env, mint_token, pace, required_env
+from shared.config import FPS
 from shared.leslider import CAMERAS, build_follower, split_state_frames
 from shared.rest_pose import RESET_POSE_DEFAULTS
 
@@ -42,9 +43,8 @@ async def main() -> None:
     token = mint_token(IDENTITY, room)
 
     cfg = RobotConfig.from_yaml_file(CONFIG_PATH, room)
-    fps = cfg.fps
 
-    follower = build_follower(fps)
+    follower = build_follower(FPS)
     robot = Robot(cfg)
     latest_action: dict[str, float] = {}
 
@@ -82,11 +82,11 @@ async def main() -> None:
     logger.info(
         "[robot] connected; cameras=%s; streaming at %d fps; ctrl-c to stop",
         list(CAMERAS),
-        fps,
+        FPS,
     )
 
     try:
-        async for _ in pace(fps):
+        async for _ in pace(FPS):
             ts_us = int(time.time() * 1_000_000)
 
             state, frames = split_state_frames(follower.get_observation())

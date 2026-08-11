@@ -13,6 +13,7 @@ carriage).
 | `settle.py`   | `SettleGate` — wait for the arm to reach the last command before re-inferencing |
 | `train.py`    | fine-tune MolmoAct2 on a leslider dataset (`policy-train`) |
 | `run.py`      | operator entry point: loads a checkpoint and serves the `run_policy` RPC (`policy`) |
+| `debug_policy.py` | interactive terminal driver: start/stop the policy and retype the prompt (`policy-debug`) |
 
 ## Why `slider.vel` is dropped
 
@@ -42,10 +43,46 @@ uv run policy --checkpoint outputs/molmoact2-candy/pretrained_model   # your fin
 uv run policy --task "pick up the blue candy" --duration 20
 ```
 
-**Settle gate:** before each inference the operator waits until the observed arm
-reaches the last command (within `--settle-tolerance` per joint, giving up after
-`--settle-timeout` seconds), sending nothing meanwhile. Set `--settle-tolerance 0`
-to disable it and stream open-loop at `fps`.
+## Debugging by hand (`policy-debug`)
+
+Loads the same checkpoint into its own operator (`policy-debug`) and drives it
+from the terminal — no `run_policy` RPC, no reward operator, no voice agent.
+Takes the same flags as `policy`; `--duration` defaults to "run until stopped".
+
+```bash
+uv run policy-debug --checkpoint outputs/molmoact2-candy/pretrained_model
+```
+
+```
+policy> start pick up the red candy   # start (retyping the instruction first)
+policy> prompt pick up the blue one   # swap it mid-run: the next tick inferences on it
+policy> stop                          # preempt, release active control
+policy> <enter>                       # toggle start/stop
+policy> status | quit
+```
+
+Only run **one** thing that takes active-operator control at a time: don't run
+`uv run policy` against the same room while debugging.
+
+**Start pose:** every pick begins by easing the arm into an in-distribution pose,
+so the first chunk is planned from a state the checkpoint recognizes. The
+checkpoint normalizes state against its own q01/q99 quantiles and then *clamps*,
+and parked in the folded rest pose this rig saturates four of six joints
+(`shoulder_lift`, `elbow_flex`, `wrist_roll`, `gripper`) — measured on real rig
+frames, a saturated start plans ~6 units of motion per chunk versus ~96 from an
+in-range start on the *same* images. `--start-pose` takes `auto` (the default,
+`START_POSE` in `molmoact.py`), `none` to skip priming, or six comma-separated
+wire values; `--start-ramp` (2 s) sets how gently it eases in, since the target
+can be 60+ units away.
+
+**Settle gate:** MolmoAct2 emits 30-step chunks — `select_action` pops one step
+per tick and only runs the model when the chunk drains. The gate sits at that
+**replan boundary**: a fresh chunk is planned from a single observation, so the
+arm (and the camera frame paired with it) must have caught up to the last
+command first — within `--settle-tolerance` per joint, or once the arm stops
+moving, or after `--settle-timeout` seconds. The mid-chunk pops in between are
+not gated and execute at `fps`. Set `--settle-tolerance 0` to replan the instant
+the chunk drains.
 
 ## Training
 
@@ -86,5 +123,6 @@ You also need a robot process (`uv run robot`) and, for a real order, a
 `POLICY_CHECKPOINT`, `POLICY_TASK`, `POLICY_DEVICE`, `POLICY_DURATION_S`,
 `POLICY_INFERENCE_ACTION_MODE` (`continuous`), `POLICY_PRIMARY_CAMERA`
 (`overhead_camera`), `POLICY_WRIST_CAMERA` (`arm_camera`),
-`POLICY_SETTLE_TOLERANCE` (`2.0`), `POLICY_SETTLE_TIMEOUT_S` (`2.0`), plus the
-shared `LIVEKIT_*`.
+`POLICY_SETTLE_TOLERANCE` (`2.0`), `POLICY_SETTLE_TIMEOUT_S` (`2.0`),
+`POLICY_START_POSE` (`auto`), `POLICY_START_RAMP_S` (`2.0`),
+`POLICY_START_TOLERANCE` (`3.0`), plus the shared `LIVEKIT_*`.

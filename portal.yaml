@@ -18,6 +18,8 @@
 
 version: 1
 
+# Portal exposes no getter for this, so the processes read their own tick rate
+# from shared/config.py — change both together.
 fps: 30
 
 # When a state sample arrives at the operator's synchronizer with no

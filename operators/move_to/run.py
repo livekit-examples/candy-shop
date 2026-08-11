@@ -16,6 +16,7 @@ import pathlib
 from livekit.portal import Operator, OperatorConfig, RpcError, RpcInvocationData
 
 from shared.common import env_str, load_env, mint_token, required_env
+from shared.config import FPS
 
 from operators.move_to import config
 from operators.move_to.servo import SliderServo
@@ -68,7 +69,7 @@ async def main() -> None:
 
     cfg = OperatorConfig.from_yaml_file(CONFIG_PATH, room)
     op = Operator(cfg)
-    servo = SliderServo(op, fps=cfg.fps, safe_zone=safe_zone, detector=detector)
+    servo = SliderServo(op, fps=FPS, safe_zone=safe_zone, detector=detector)
 
     async def move_to(data: RpcInvocationData) -> str:
         logger.info("[move-to] move_to RPC from '%s'", data.caller_identity)
@@ -82,13 +83,23 @@ async def main() -> None:
         outcome = await servo.servo_to(target, f"move_to({target:.1f})")
         return json.dumps({"requested": requested, "capped": target != requested, **outcome})
 
+    async def stop(data: RpcInvocationData) -> str:
+        """Preempt the move in flight: halts the travel, leaves the arm where it is.
+
+        Unlike the robot's `reset_to_zero_position`, which also folds the arm.
+        """
+        logger.info("[move-to] stop RPC from '%s'", data.caller_identity)
+        servo.request_stop()
+        return json.dumps({"stopped": True})
+
     op.register_rpc_method("move_to", move_to)
+    op.register_rpc_method("stop", stop)
     op.on_operator_joined(lambda i: logger.info("[move-to] operator joined: %s", i))
     op.on_operator_left(lambda i: logger.info("[move-to] operator left: %s", i))
 
     logger.info("[move-to] connecting to %s as '%s' in room '%s' ...", url, IDENTITY, room)
     await op.connect(url, token)
-    logger.info("[move-to] connected as '%s'; awaiting move_to RPCs", op.local_identity())
+    logger.info("[move-to] connected as '%s'; awaiting move_to/stop RPCs", op.local_identity())
 
     try:
         # No tick loop: the servo runs only inside an active RPC.
