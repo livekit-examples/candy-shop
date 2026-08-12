@@ -750,19 +750,29 @@ _UNBINDABLE = frozenset({
 })
 
 
+# Tab shares its value (512) with the range sentinel, and `dir()` surfaces only
+# the sentinel. `tab` is the name that round-trips: TERMINAL_CHARS knows it and
+# `getattr(imgui.Key, "tab")` resolves it back.
+_KEY_ALIASES = {"named_key_begin": "tab"}
+
+
 def _captured_key() -> Optional[str]:
     """Name of whatever key was pressed this frame, or None. Scans the named-key range
     so an unusual pedal (F13-F24, a media key) binds like anything else."""
     if imgui.is_key_pressed(imgui.Key.escape, False):
         return None
+    # `is_key_pressed` asserts outside this range, and the enum also carries the
+    # range sentinels (`none`, `named_key_end`) and the mod bitmasks — scanning
+    # those is what took the window down the moment a capture started.
+    named = range(int(imgui.Key.named_key_begin), int(imgui.Key.named_key_end))
     for name in dir(imgui.Key):
         if name.startswith("__") or name in _UNBINDABLE:
             continue
         key = getattr(imgui.Key, name)
-        if not isinstance(key, imgui.Key):
+        if not isinstance(key, imgui.Key) or int(key) not in named:
             continue
         if imgui.is_key_pressed(key, False):
-            return name
+            return _KEY_ALIASES.get(name, name)
     return None
 
 
