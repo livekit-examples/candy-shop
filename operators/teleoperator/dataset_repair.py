@@ -295,6 +295,14 @@ def _pa_scalar(dtype: str):
     return _PA_SCALAR[dtype]
 
 
+def _list(value_type: pa.DataType) -> pa.DataType:
+    """``list<element: T>``. lerobot's writer names list children ``element``;
+    ``pa.list_()`` defaults to ``item``, and the child name is part of the column
+    path the pages were written under — get it wrong and the rebuilt footer reads
+    each list column as the wrong type."""
+    return pa.list_(pa.field("element", value_type))
+
+
 def _data_arrow_schema(features: dict) -> pa.Schema:
     """The data-file parquet schema lerobot writes: non-image/video features in
     declaration order. Shape-(1,) features store as scalars, multi-element ones
@@ -305,7 +313,7 @@ def _data_arrow_schema(features: dict) -> pa.Schema:
             continue
         t = _pa_scalar(spec["dtype"])
         shape = tuple(spec.get("shape", [1]))
-        fields.append(pa.field(name, t if shape in ((), (1,)) else pa.list_(t)))
+        fields.append(pa.field(name, t if shape in ((), (1,)) else _list(t)))
     return pa.schema(fields)
 
 
@@ -318,7 +326,7 @@ def _episodes_arrow_schema(features: dict) -> pa.Schema:
 
     fields = [
         pa.field("episode_index", pa.int64()),
-        pa.field("tasks", pa.list_(pa.string())),
+        pa.field("tasks", _list(pa.string())),
         pa.field("length", pa.int64()),
         pa.field("data/chunk_index", pa.int64()),
         pa.field("data/file_index", pa.int64()),
@@ -334,21 +342,13 @@ def _episodes_arrow_schema(features: dict) -> pa.Schema:
         ]
 
     def stat_fields(feat, is_image):
-        is_int = str(features[feat]["dtype"]).startswith("int")
-        if is_image:
-            base = pa.list_(pa.list_(pa.list_(pa.float64())))   # per-channel (C,1,1)
-            minmax = base
-        else:
-            base = pa.list_(pa.float64())
-            minmax = pa.list_(pa.int64()) if is_int else pa.list_(pa.float64())
+        # Every stat but `count` is float64, including min/max of int features —
+        # lerobot computes them through numpy floats and never casts back.
+        base = _list(_list(_list(pa.float64()))) if is_image else _list(pa.float64())
         out = []
         for sk in STATKEYS:
-            if sk == "count":
-                out.append(pa.field(f"stats/{feat}/count", pa.list_(pa.int64())))
-            elif sk in ("min", "max"):
-                out.append(pa.field(f"stats/{feat}/{sk}", minmax))
-            else:
-                out.append(pa.field(f"stats/{feat}/{sk}", base))
+            t = _list(pa.int64()) if sk == "count" else base
+            out.append(pa.field(f"stats/{feat}/{sk}", t))
         return out
 
     for feat in numeric_keys:
@@ -460,14 +460,30 @@ def _rows_per_rg(buf: bytes, ncols: int, limit=None):
     return [_chunk_stats(g[-1])["leaf"] for g in rgs]
 
 
+def _schema_for(directory: Path, broken: Path, generated: pa.Schema) -> pa.Schema:
+    """Schema to rebuild ``broken`` against.
+
+    A valid sibling in the same directory is ground truth — same writer, same
+    session, so it can't drift from what the pages were written under. The
+    schema regenerated from ``info.json`` is the fallback for when every file in
+    the directory is footerless."""
+    for sibling in sorted(directory.glob("file-*.parquet")):
+        if sibling != broken and _has_footer(sibling):
+            return pq.read_schema(sibling)
+    return generated
+
+
 def repair_dataset(root: str | Path) -> bool:
     """Repair footerless parquet files under a LeRobotDataset ``root`` in place.
 
-    True if anything was repaired, False if both footers are already valid.
-    Corrupt files back up to ``<root>/.corrupt-originals/`` first. Data and
-    metadata are reconciled to the same committed episode count (dropping a
-    trailing data row group written just before a crash), and ``meta/info.json``
-    updated to match."""
+    True if anything was repaired, False if every footer is already valid.
+    Corrupt files back up to ``<root>/.corrupt-originals/`` first.
+
+    Every ``file-*.parquet`` is checked, not just ``file-000``: each
+    ``suspend()``/``resume()`` cycle rolls a new file, so the footerless one is
+    whichever was open when the process died — usually the last. Each data file
+    is trimmed to the episode count its paired metadata file committed, and
+    ``meta/info.json`` reconciled to the totals."""
     root = Path(root)
     info_path = root / "meta" / "info.json"
     if not info_path.exists():
@@ -475,56 +491,65 @@ def repair_dataset(root: str | Path) -> bool:
     info = json.loads(info_path.read_text())
     features = info["features"]
 
-    data_path = root / "data" / "chunk-000" / "file-000.parquet"
-    eps_path = root / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+    eps_dir = root / "meta" / "episodes" / "chunk-000"
+    data_dir = root / "data" / "chunk-000"
+    eps_files = sorted(eps_dir.glob("file-*.parquet"))
+    data_files = sorted(data_dir.glob("file-*.parquet"))
 
-    data_ok = data_path.exists() and _has_footer(data_path)
-    eps_ok = eps_path.exists() and _has_footer(eps_path)
-    if data_ok and eps_ok:
+    broken = [p for p in eps_files + data_files if not _has_footer(p)]
+    if not broken:
         return False
 
-    logger.warning("dataset at %s has footerless parquet(s) — repairing "
-                   "(data_ok=%s eps_ok=%s)", root, data_ok, eps_ok)
+    logger.warning("dataset at %s has %d footerless parquet(s) — repairing: %s",
+                   root, len(broken), ", ".join(str(p.relative_to(root)) for p in broken))
     backup = root / ".corrupt-originals"
 
-    # --- rebuild the metadata (episodes) footer; it defines the committed count
-    eps_schema = _episodes_arrow_schema(features)
-    eps_ncols = len(eps_schema)
-    if not eps_ok:
-        raw = eps_path.read_bytes()
-        fmd_t, cols_t = _footer_template(eps_schema)
-        fixed, eps_rows, _ = _rebuild_footer(raw, eps_ncols, fmd_t, cols_t)
-        _backup_and_write(eps_path, root, raw, fixed, backup)
-    else:
-        eps_rows = pq.read_metadata(eps_path).num_rows
-    committed_eps = eps_rows
+    # Metadata first: each episodes file caps how many episodes its paired data
+    # file may keep.
+    committed_eps: dict[str, int] = {}
+    for path in eps_files:
+        if _has_footer(path):
+            committed_eps[path.name] = pq.read_metadata(path).num_rows
+            continue
+        raw = path.read_bytes()
+        schema = _schema_for(eps_dir, path, _episodes_arrow_schema(features))
+        fmd_t, cols_t = _footer_template(schema)
+        fixed, rows, _ = _rebuild_footer(raw, len(schema), fmd_t, cols_t)
+        _backup_and_write(path, root, raw, fixed, backup)
+        committed_eps[path.name] = rows
+        logger.warning("rebuilt %s: %d episodes", path.relative_to(root), rows)
 
-    # --- rebuild the data footer, trimming to the committed episode count
-    data_schema = _data_arrow_schema(features)
-    data_ncols = len(data_schema)
-    if not data_ok:
-        raw = data_path.read_bytes()
-        rows = _rows_per_rg(raw, data_ncols)
-        keep = min(committed_eps, len(rows))
-        committed_frames = sum(rows[:keep])
-        fmd_t, cols_t = _footer_template(data_schema)
-        fixed, _, _ = _rebuild_footer(raw, data_ncols, fmd_t, cols_t, keep_row_groups=keep)
-        _backup_and_write(data_path, root, raw, fixed, backup)
-    else:
-        md = pq.read_metadata(data_path)
-        committed_frames = md.num_rows
+    total_frames = 0
+    for path in data_files:
+        if _has_footer(path):
+            total_frames += pq.read_metadata(path).num_rows
+            continue
+        raw = path.read_bytes()
+        schema = _schema_for(data_dir, path, _data_arrow_schema(features))
+        rows = _rows_per_rg(raw, len(schema))
+        # A crash can leave a data row group whose episode never reached the
+        # metadata; keeping it would invent an episode nothing else references.
+        keep = min(committed_eps.get(path.name, len(rows)), len(rows))
+        fmd_t, cols_t = _footer_template(schema)
+        fixed, _, _ = _rebuild_footer(raw, len(schema), fmd_t, cols_t, keep_row_groups=keep)
+        _backup_and_write(path, root, raw, fixed, backup)
+        total_frames += sum(rows[:keep])
+        logger.warning("rebuilt %s: %d/%d row groups, %d frames",
+                       path.relative_to(root), keep, len(rows), sum(rows[:keep]))
+
+    total_eps = sum(committed_eps.values())
 
     # --- reconcile info.json to the committed counts
-    if info.get("total_episodes") != committed_eps or info.get("total_frames") != committed_frames:
+    if info.get("total_episodes") != total_eps or info.get("total_frames") != total_frames:
         logger.warning("reconciling info.json: episodes %s->%s, frames %s->%s",
-                       info.get("total_episodes"), committed_eps,
-                       info.get("total_frames"), committed_frames)
-        info["total_episodes"] = committed_eps
-        info["total_frames"] = committed_frames
-        info["splits"] = {"train": f"0:{committed_eps}"}
+                       info.get("total_episodes"), total_eps,
+                       info.get("total_frames"), total_frames)
+        info["total_episodes"] = total_eps
+        info["total_frames"] = total_frames
+        info["splits"] = {"train": f"0:{total_eps}"}
         info_path.write_text(json.dumps(info, indent=4))
 
-    logger.warning("repair complete: %d episodes / %d frames readable", committed_eps, committed_frames)
+    logger.warning("repair complete: %d episodes / %d frames readable", total_eps, total_frames)
     return True
 
 
