@@ -74,7 +74,11 @@ def main() -> None:
     parser.add_argument("--video-backend", default="pyav")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # force: importing lerobot installs a root handler, which would make this a no-op
+    # and leave the root logger at WARNING — every INFO line below silently dropped.
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", force=True
+    )
     load_env(pathlib.Path(__file__).resolve().parent)
 
     # Metadata first: we need fps + the camera key to build the observation window
