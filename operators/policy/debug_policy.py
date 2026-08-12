@@ -25,10 +25,9 @@ chop up the prompt; quiet them with ``RUST_LOG`` or park stderr in a file.
 
 Usage::
 
-    uv run policy-debug
-    RUST_LOG=error uv run policy-debug            # quiet native logs
-    uv run policy-debug 2>/tmp/policy-debug.log   # or park them entirely
-    uv run policy-debug --checkpoint outputs/molmoact2-candy/pretrained_model
+    uv run policy-debug --checkpoint outputs/smolvla-candy/pretrained_model
+    RUST_LOG=error uv run policy-debug ...            # quiet native logs
+    uv run policy-debug ... 2>/tmp/policy-debug.log   # or park them entirely
 """
 from __future__ import annotations
 
@@ -41,6 +40,12 @@ import pathlib
 import sys
 import threading
 import time
+
+try:  # POSIX only; without them the prompt falls back to line-buffered input.
+    import termios
+    import tty
+except ImportError:  # pragma: no cover - Windows
+    termios = tty = None  # type: ignore[assignment]
 
 from livekit.portal import Operator, OperatorConfig
 
@@ -64,16 +69,99 @@ HELP = """commands:
 logger = logging.getLogger(__name__)
 
 
+_EOF = object()
+
+
+class _LineEditor:
+    """Keeps what you are typing visible while the policy prints telemetry.
+
+    A run emits a line every ~0.5 s, and each one has to wipe the prompt line to
+    write above it. Under the tty's default canonical mode the typed characters
+    live in the kernel's line buffer, unreadable from here, so a redraw can only
+    put back the bare prompt -- the input is still buffered but no longer on
+    screen, which makes the prompt unusable mid-run. So drop canonical mode, hold
+    the edit buffer here, and re-echo it after every async write.
+    """
+
+    def __init__(self) -> None:
+        # One lock for the buffer and for stdout: the pump thread echoes
+        # keystrokes while the event loop writes telemetry.
+        self._lock = threading.RLock()
+        self._buf = ""
+        self._saved: list | None = None
+        self._esc = False
+
+    def enable(self) -> bool:
+        """Take the tty out of canonical mode. False if stdin is not a terminal."""
+        if termios is None or not sys.stdin.isatty():
+            return False
+        self._saved = termios.tcgetattr(sys.stdin.fileno())
+        # cbreak, not raw: ISIG stays on so Ctrl-C still raises KeyboardInterrupt,
+        # and ONLCR stays on so plain print() still ends lines correctly.
+        tty.setcbreak(sys.stdin.fileno())
+        return True
+
+    def restore(self) -> None:
+        if self._saved is not None:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._saved)
+            self._saved = None
+
+    @property
+    def active(self) -> bool:
+        return self._saved is not None
+
+    def redraw(self) -> None:
+        with self._lock:
+            sys.stdout.write(f"\r\x1b[2K{PROMPT}{self._buf}")
+            sys.stdout.flush()
+
+    def emit(self, text: str) -> None:
+        """Write async output above the prompt, then restore the edit line."""
+        with self._lock:
+            sys.stdout.write(f"\r\x1b[2K{text}\n{PROMPT}{self._buf}")
+            sys.stdout.flush()
+
+    def feed(self, ch: str) -> str | object | None:
+        """Handle one keystroke: the finished line, ``_EOF``, or None if still editing."""
+        with self._lock:
+            if self._esc:  # tail of an escape sequence (arrow keys, Home, ...)
+                if ch.isalpha() or ch == "~":
+                    self._esc = False
+                return None
+            if ch == "\x1b":
+                self._esc = True
+                return None
+            if ch in ("\r", "\n"):
+                line, self._buf = self._buf, ""
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                return line
+            if ch == "\x04":  # Ctrl-D: EOF only on an empty line, as a shell does
+                return _EOF if not self._buf else None
+            if ch in ("\x7f", "\b"):
+                self._buf = self._buf[:-1]
+            elif ch == "\x15":  # Ctrl-U
+                self._buf = ""
+            elif ch >= " ":
+                self._buf += ch
+            else:
+                return None
+            self.redraw()
+            return None
+
+
+_editor = _LineEditor()
+
+
 def _echo_prompt() -> None:
-    print(PROMPT, end="", flush=True)
+    _editor.redraw()
 
 
 def _emit(text: str) -> None:
-    """Print output that arrives while the user may be mid-line: wipe the prompt,
-    write the text, redraw the prompt. For async output only -- command replies
-    print normally, since the read loop redraws the prompt after each command."""
-    sys.stdout.write(f"\r\x1b[2K{text}\n{PROMPT}")
-    sys.stdout.flush()
+    """Print output that arrives while the user may be mid-line: wipe the line,
+    write the text, redraw prompt + edit buffer. For async output only -- command
+    replies print normally, since the read loop redraws the prompt after each."""
+    _editor.emit(text)
 
 
 class _PromptHandler(logging.StreamHandler):
@@ -94,12 +182,22 @@ def _stdin_queue(loop: asyncio.AbstractEventLoop) -> asyncio.Queue[str | None]:
     """
     queue: asyncio.Queue[str | None] = asyncio.Queue()
 
-    def pump() -> None:
+    def pump_keys() -> None:
+        while True:
+            ch = sys.stdin.read(1)
+            item = _editor.feed(ch) if ch else _EOF
+            if item is _EOF:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+                return
+            if item is not None:
+                loop.call_soon_threadsafe(queue.put_nowait, item)
+
+    def pump_lines() -> None:
         for line in sys.stdin:
             loop.call_soon_threadsafe(queue.put_nowait, line)
         loop.call_soon_threadsafe(queue.put_nowait, None)
 
-    threading.Thread(target=pump, daemon=True).start()
+    threading.Thread(target=pump_keys if _editor.active else pump_lines, daemon=True).start()
     return queue
 
 
@@ -123,8 +221,8 @@ class DebugConsole:
     def on_tick(self, info: dict) -> None:
         """Per-tick line: is it inferring, and is the command going anywhere?
 
-        Replan ticks (the model actually running, ~1/s on a 30-step chunk) always
-        print; the cheap mid-chunk pops in between are throttled.
+        Replan ticks (the model actually running, ~every 50 ticks on a 50-step
+        chunk) always print; the cheap mid-chunk pops in between are throttled.
         """
         now = time.monotonic()
         if not info["replan"] and now - self._last_telemetry < TELEMETRY_PERIOD_S:
@@ -164,7 +262,7 @@ class DebugConsole:
     def set_task(self, text: str) -> None:
         self._task = text
         self._runner.set_task(text)
-        print(f"prompt: {text!r}{' (live)' if self.running else ''}")
+        print(f"prompt: {text!r}{' (live: refolds, then plans on it)' if self.running else ''}")
 
     def status(self) -> None:
         print(f"{'running' if self.running else 'idle'} | prompt={self._task!r} | "
@@ -209,16 +307,22 @@ class DebugConsole:
 
 
 async def main() -> None:
-    parser = argparse.ArgumentParser(description="Interactive terminal driver for the MolmoAct2 policy.")
+    # Before the parser: add_policy_args reads the POLICY_* defaults (and the
+    # required --checkpoint) from os.environ as it declares the arguments.
+    load_env(pathlib.Path(__file__).resolve().parent)
+
+    parser = argparse.ArgumentParser(description="Interactive terminal driver for the SmolVLA policy.")
     add_policy_args(parser)
     args = parser.parse_args()
 
+    # force: importing lerobot installs a root handler, which would make this a
+    # no-op — leaving _PromptHandler uninstalled, so logs chop up the prompt line.
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         format="%(levelname)s %(name)s: %(message)s",
         handlers=[_PromptHandler()],
+        force=True,
     )
-    load_env(pathlib.Path(__file__).resolve().parent)
 
     url = required_env("LIVEKIT_URL")
     room = env_str("LIVEKIT_ROOM", "candy-shop")
@@ -240,6 +344,7 @@ async def main() -> None:
     print(f"\n{HELP}\n")
     console.status()
 
+    _editor.enable()
     queue = _stdin_queue(asyncio.get_running_loop())
     try:
         while True:
@@ -253,6 +358,7 @@ async def main() -> None:
     except (KeyboardInterrupt, asyncio.CancelledError):
         print()
     finally:
+        _editor.restore()  # before the shutdown logs, so the shell is sane again
         await console.shutdown()
         logger.info("[debug] disconnecting ...")
         try:
