@@ -17,7 +17,9 @@ SLIDER_VEL_KEY = "slider.vel"
 
 ALL_ACTION_KEYS: tuple[str, ...] = ARM_POS_KEYS + (SLIDER_VEL_KEY,)
 
-# Arm folded to a safe pose, slider stopped.
+# Arm folded to a safe pose, slider stopped. Also where the policy ramps to before
+# its first plan: the recorded episodes all begin folded like this, so it is the
+# pose a fine-tune is in distribution for.
 RESET_POSE_DEFAULTS: dict[str, float] = {
     "shoulder_pan.pos":   1.76,
     "shoulder_lift.pos": -99.87,

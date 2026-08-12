@@ -1,7 +1,7 @@
 """Settle gate: decide when a fresh observation has caught up to the last
 commanded pose, so the policy replans from a state the arm actually reached.
 
-MolmoAct2 emits 30-step chunks: ``select_action`` pops one step per tick and
+SmolVLA emits 50-step chunks: ``select_action`` pops one step per tick and
 only runs the model when the chunk drains. The gate belongs at that **replan
 boundary** -- the new chunk is conditioned on one observation, and the camera
 frame paired with it cannot be extrapolated forward. Mid-chunk pops are not

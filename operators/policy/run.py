@@ -1,7 +1,10 @@
-"""Picker operator: serve MolmoAct2 (six-DOF arm) over the ``run_policy`` RPC.
+"""Picker operator: serve SmolVLA (six-DOF arm) over the ``run_policy`` RPC.
 
-    uv run policy                             # default SO-101 checkpoint, zero-shot
-    uv run policy --checkpoint outputs/molmoact2-candy/pretrained_model
+The checkpoint is required — there is no servable stock SmolVLA, so fine-tune
+one first (see ``train.py``)::
+
+    uv run policy --checkpoint outputs/smolvla-candy/pretrained_model
+    uv run policy --checkpoint <user>/smolvla-candy       # or a Hub repo id
 """
 from __future__ import annotations
 
@@ -19,20 +22,26 @@ import torch
 
 from livekit.portal import Observation, Operator, OperatorConfig, RpcError, RpcInvocationData, frame_bytes_to_numpy_rgb
 
-from lerobot.policies.molmoact2.modeling_molmoact2 import MolmoAct2Policy
+from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 from lerobot.policies import make_pre_post_processors
 from lerobot.policies.utils import prepare_observation_for_inference
-from lerobot.utils.constants import OBS_STATE
+from lerobot.utils.constants import ACTION, OBS_STATE
 
 from shared.common import env_str, load_env, mint_token, pace, required_env
 from shared.config import FPS
-from shared.rest_pose import ARM_POS_KEYS, SLIDER_VEL_KEY
+from shared.rest_pose import ARM_POS_KEYS, RESET_POSE_DEFAULTS, SLIDER_VEL_KEY
 
-from operators.policy.molmoact import ACTION_NAMES, DEFAULT_CHECKPOINT, START_POSE, resolve_image_keys
 from operators.policy.settle import SettleGate
+from operators.policy.smolvla import ACTION_NAMES, resolve_camera_map
 
 IDENTITY = "policy-operator"
 CONFIG_PATH = pathlib.Path(__file__).resolve().parent.parent.parent / "portal.yaml"
+
+# Every pick starts by folding here, because that is where every recorded episode
+# starts: the rig can come to rest with the elbow standing up, tens of units
+# outside anything in the dataset, and the first chunk is conditioned on whatever
+# pose we plan from. Arm keys only — the ramp pins the slider itself.
+START_POSE: dict[str, float] = {key: RESET_POSE_DEFAULTS[key] for key in ARM_POS_KEYS}
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +73,7 @@ class PolicyRunner:
     def __init__(self, op: Operator, *, fps: int, device: str, duration_s: float,
                  policy, preprocessor, postprocessor, camera_for_key: dict[str, str],
                  settle_tolerance: float, settle_timeout_s: float,
-                 start_pose: dict[str, float] | None = None, start_ramp_s: float = 2.0,
-                 start_tolerance: float = 3.0,
+                 start_ramp_s: float = 2.0, start_tolerance: float = 3.0,
                  on_tick: Callable[[dict], None] | None = None) -> None:
         self._op = op
         self._fps = fps
@@ -81,10 +89,10 @@ class PolicyRunner:
         self._state: dict[str, float] = {}
         self._obs_ts_us = 0
         self._frames: dict[str, np.ndarray] = {}
-        self._start_pose = start_pose
         self._start_ramp_s = start_ramp_s
         self._start_tolerance = start_tolerance
         self._task = ""
+        self._reprime = False  # set by set_task: refold before planning the new one
         self._on_tick = on_tick  # per-tick telemetry for the debug driver
         self._stop = asyncio.Event()
         op.on_observation(self._on_observation)
@@ -108,8 +116,13 @@ class PolicyRunner:
             raise RpcError.Error(code=1409, message="no robot state/frames yet", data=None)
 
     def set_task(self, task: str) -> None:
-        """Swap the instruction; a run in flight picks it up on its next tick."""
+        """Swap the instruction. A run in flight folds back to ``START_POSE`` before
+        planning on it, so the new instruction is conditioned on the same pose a
+        fresh pick would start from rather than wherever the old one left the arm."""
+        if task == self._task:
+            return
         self._task = task
+        self._reprime = True
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -117,10 +130,11 @@ class PolicyRunner:
     def _replan_pending(self) -> bool:
         """True when the next ``select_action`` runs the model instead of popping.
 
-        MolmoAct2 buffers a 30-step chunk in ``_action_queue`` and only replans
-        once it drains (empty also before the first plan).
+        SmolVLA buffers an ``n_action_steps`` chunk (50 by default, ~1.7 s at 30
+        fps) in ``_queues[ACTION]`` and only replans once it drains (empty also
+        before the first plan).
         """
-        return not getattr(self._policy, "_action_queue", None)
+        return not getattr(self._policy, "_queues", {}).get(ACTION)
 
     @torch.inference_mode()
     def _infer(self, state_vec: np.ndarray, images: dict[str, np.ndarray], task: str) -> torch.Tensor:
@@ -140,18 +154,18 @@ class PolicyRunner:
         self._op.send_action(action, timestamp_us=_now_us(), in_reply_to_ts_us=self._obs_ts_us)
 
     async def _goto_start(self) -> bool:
-        """Drive the arm to the priming pose before the first plan.
+        """Fold the arm to ``START_POSE`` before the first plan.
 
         Ramped over ``start_ramp_s`` rather than commanded as one absolute jump:
         the target can be 60+ units away and the follower would otherwise slew
         there at full speed. Returns False only if stopped mid-approach; a joint
         that never arrives is logged and the pick proceeds anyway.
         """
-        if not self._start_pose or not all(key in self._state for key in ARM_POS_KEYS):
+        if not all(key in self._state for key in ARM_POS_KEYS):
             return True
 
         origin = {key: float(self._state[key]) for key in ARM_POS_KEYS}
-        gap = max(abs(self._start_pose[key] - origin[key]) for key in ARM_POS_KEYS)
+        gap = max(abs(START_POSE[key] - origin[key]) for key in ARM_POS_KEYS)
         logger.info("[policy] priming to start pose (max joint move %.1f)", gap)
 
         ramp_ticks = max(1, int(self._start_ramp_s * self._fps))
@@ -162,13 +176,13 @@ class PolicyRunner:
                 return False
             tick += 1
             alpha = min(1.0, tick / ramp_ticks)
-            cmd = {key: origin[key] + (self._start_pose[key] - origin[key]) * alpha
+            cmd = {key: origin[key] + (START_POSE[key] - origin[key]) * alpha
                    for key in ARM_POS_KEYS}
             cmd[SLIDER_VEL_KEY] = 0.0
             self._op.send_action(cmd, timestamp_us=_now_us(), in_reply_to_ts_us=self._obs_ts_us)
             if alpha < 1.0:
                 continue
-            error = max(abs(self._state[key] - self._start_pose[key]) for key in ARM_POS_KEYS)
+            error = max(abs(self._state[key] - START_POSE[key]) for key in ARM_POS_KEYS)
             if error <= self._start_tolerance:
                 logger.info("[policy] at start pose (max joint err %.1f)", error)
                 return True
@@ -180,6 +194,7 @@ class PolicyRunner:
     async def pick(self, task: str) -> dict:
         """Run the policy until done/timeout/stop, holding the slider still."""
         self._task = task
+        self._reprime = False  # the _goto_start below is the priming for this task
         self._stop.clear()
         self._settle.reset()
         await self._op.set_active_operator(self._op.local_identity())
@@ -193,9 +208,8 @@ class PolicyRunner:
         ticks = 0
         reason = "duration"
         try:
-            # Park in-distribution before the first plan; the pose we arrive at
-            # is what the first chunk gets conditioned on. A stop during the
-            # approach falls through to the loop's stop check below.
+            # The pose we arrive at is what the first chunk gets conditioned on.
+            # A stop during the approach falls through to the loop's stop check.
             await self._goto_start()
             self._settle.reset()  # the approach already left the arm settled
 
@@ -209,6 +223,22 @@ class PolicyRunner:
                     reason = "duration"
                     break
                 if not self.ready:
+                    continue
+
+                # A prompt swap re-primes: fold back before planning on it, for the
+                # same reason the first plan does. The buffered chunk goes too --
+                # it was planned for the old instruction, and without the reset it
+                # would keep popping (and steer the fold) until it drained.
+                if self._reprime:
+                    self._reprime = False
+                    logger.info("[policy] prompt changed to %r: refolding", self._task)
+                    self._policy.reset()
+                    self._pre.reset()
+                    self._post.reset()
+                    if not await self._goto_start():
+                        reason = "stopped"
+                        break
+                    self._settle.reset()
                     continue
 
                 # Gate the replan boundary only: a fresh chunk must be planned
@@ -246,12 +276,13 @@ class PolicyRunner:
         return {"task": self._task, "reason": reason, "ticks": ticks, "elapsed_s": elapsed}
 
 
-def _load_policy(checkpoint: str, device: str, inference_action_mode: str):
+def _load_policy(checkpoint: str, device: str, num_steps: int):
     """Load the checkpoint, wire its normalizer, and build the processors."""
-    logger.info("[policy] loading %s (downloads MolmoAct2 weights on first run)...", checkpoint)
-    policy = MolmoAct2Policy.from_pretrained(checkpoint)
+    logger.info("[policy] loading %s (downloads the SmolVLM2 backbone on first run)...", checkpoint)
+    policy = SmolVLAPolicy.from_pretrained(checkpoint)
     policy.config.device = device
-    policy.config.inference_action_mode = inference_action_mode
+    if num_steps > 0:
+        policy.config.num_steps = num_steps
     policy = policy.to(device)
     policy.eval()
 
@@ -265,37 +296,27 @@ def _load_policy(checkpoint: str, device: str, inference_action_mode: str):
     return policy, preprocessor, postprocessor
 
 
-def parse_start_pose(raw: str) -> dict[str, float] | None:
-    """``auto`` -> the checkpoint's in-distribution pose, ``none`` -> skip priming,
-    or six comma/space-separated wire values in ``ARM_POS_KEYS`` order."""
-    value = raw.strip().lower()
-    if value in ("", "auto"):
-        return dict(START_POSE)
-    if value in ("none", "off"):
-        return None
-    parts = raw.replace(",", " ").split()
-    if len(parts) != len(ARM_POS_KEYS):
-        raise ValueError(f"--start-pose needs {len(ARM_POS_KEYS)} values ({', '.join(ARM_POS_KEYS)}), got {len(parts)}")
-    return {key: float(part) for key, part in zip(ARM_POS_KEYS, parts)}
-
-
 def add_policy_args(parser: argparse.ArgumentParser) -> None:
     """The checkpoint/inference knobs, shared with the debug driver."""
-    parser.add_argument("--checkpoint", default=env_str("POLICY_CHECKPOINT", DEFAULT_CHECKPOINT))
+    # No default: there is no servable stock SmolVLA checkpoint, so guessing one
+    # would only fail later, deep in a weight load.
+    checkpoint = env_str("POLICY_CHECKPOINT", "")
+    parser.add_argument("--checkpoint", default=checkpoint or None, required=not checkpoint,
+                        help="SmolVLA checkpoint to serve: a local fine-tune directory or a Hub "
+                             "repo id (or set POLICY_CHECKPOINT).")
     parser.add_argument("--task", default=env_str("POLICY_TASK", "pick up the candy"))
     parser.add_argument("--device", default=env_str("POLICY_DEVICE", "cuda" if torch.cuda.is_available() else "cpu"))
     parser.add_argument("--duration", type=float, default=float(env_str("POLICY_DURATION_S", "0")),
                         help="Wall-clock cap in seconds; <=0 runs forever until a stop RPC (the reward operator drives this).")
-    parser.add_argument("--inference-action-mode", default=env_str("POLICY_INFERENCE_ACTION_MODE", "continuous"))
+    parser.add_argument("--num-steps", type=int, default=int(env_str("POLICY_NUM_STEPS", "0")),
+                        help="Flow-matching denoising steps per chunk (latency vs quality); "
+                             "0 keeps the checkpoint's value (10).")
     parser.add_argument("--settle-tolerance", type=float, default=float(env_str("POLICY_SETTLE_TOLERANCE", "2.0")),
                         help="Max per-joint error to call the arm settled; <=0 disables the gate.")
     parser.add_argument("--settle-timeout", type=float, default=float(env_str("POLICY_SETTLE_TIMEOUT_S", "2.0")),
                         help="Give up waiting for the arm to settle after this long.")
-    parser.add_argument("--start-pose", default=env_str("POLICY_START_POSE", "auto"),
-                        help="Pose to park in before the first plan: 'auto' (the checkpoint's "
-                             "in-distribution pose), 'none' to skip, or six comma-separated wire values.")
     parser.add_argument("--start-ramp", type=float, default=float(env_str("POLICY_START_RAMP_S", "2.0")),
-                        help="Seconds to ease into the start pose (it can be 60+ units away).")
+                        help="Seconds to ease into the folded start pose (it can be 60+ units away).")
     parser.add_argument("--start-tolerance", type=float, default=float(env_str("POLICY_START_TOLERANCE", "3.0")),
                         help="Max per-joint error to call the start pose reached.")
 
@@ -303,17 +324,13 @@ def add_policy_args(parser: argparse.ArgumentParser) -> None:
 def build_runner(op: Operator, args: argparse.Namespace,
                  on_tick: Callable[[dict], None] | None = None) -> PolicyRunner:
     """Load the checkpoint, map cameras onto its image keys, and wire a runner onto `op`."""
-    policy, preprocessor, postprocessor = _load_policy(
-        args.checkpoint, args.device, args.inference_action_mode
-    )
+    policy, preprocessor, postprocessor = _load_policy(args.checkpoint, args.device, args.num_steps)
 
-    # Map the policy's image keys onto physical cameras: primary (overhead)
-    # first, wrist (arm-mounted) second.
-    image_keys = resolve_image_keys(policy.config)
-    physical = [env_str("POLICY_PRIMARY_CAMERA", "overhead_camera"), env_str("POLICY_WRIST_CAMERA", "arm_camera")]
-    if len(image_keys) > len(physical):
-        raise RuntimeError(f"policy expects {len(image_keys)} images ({image_keys}) but only {physical} are wired")
-    camera_for_key = {key: physical[i] for i, key in enumerate(image_keys)}
+    camera_for_key = resolve_camera_map(
+        policy.config,
+        env_str("POLICY_PRIMARY_CAMERA", "overhead_camera"),
+        env_str("POLICY_WRIST_CAMERA", "arm_camera"),
+    )
     logger.info("[policy] image mapping: %s", camera_for_key)
 
     return PolicyRunner(
@@ -321,22 +338,27 @@ def build_runner(op: Operator, args: argparse.Namespace,
         policy=policy, preprocessor=preprocessor, postprocessor=postprocessor,
         camera_for_key=camera_for_key,
         settle_tolerance=args.settle_tolerance, settle_timeout_s=args.settle_timeout,
-        start_pose=parse_start_pose(args.start_pose), start_ramp_s=args.start_ramp,
-        start_tolerance=args.start_tolerance,
+        start_ramp_s=args.start_ramp, start_tolerance=args.start_tolerance,
         on_tick=on_tick,
     )
 
 
 async def main() -> None:
-    parser = argparse.ArgumentParser(description="Serve MolmoAct2 as a candy-shop picker operator.")
+    # Before the parser: the POLICY_* defaults (and the required --checkpoint) are
+    # read while the arguments are declared, so .env has to be in os.environ first.
+    load_env(pathlib.Path(__file__).resolve().parent)
+
+    parser = argparse.ArgumentParser(description="Serve SmolVLA as a candy-shop picker operator.")
     add_policy_args(parser)
     args = parser.parse_args()
 
+    # force: importing lerobot installs a root handler, which would make this a no-op
+    # and leave the root logger at WARNING — every INFO line below silently dropped.
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
     )
-    load_env(pathlib.Path(__file__).resolve().parent)
 
     url = required_env("LIVEKIT_URL")
     room = env_str("LIVEKIT_ROOM", "candy-shop")

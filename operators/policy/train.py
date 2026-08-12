@@ -1,10 +1,10 @@
-"""Fine-tune MolmoAct2 on a candy-shop dataset (single GPU).
+"""Fine-tune SmolVLA on a candy-shop dataset (single GPU).
 
 The dataset's 7th field (``slider.vel``) is dropped end to end — see
-``operators/policy/molmoact.py``.
+``operators/policy/smolvla.py``.
 
     uv run policy-train --dataset <user>/candy_shop --dataset-root data/candy_shop
-    # writes outputs/molmoact2-candy; VRAM knobs: --train-action-expert-only, --lora, --gradient-checkpointing
+    # writes outputs/smolvla-candy; VRAM knobs: --batch-size, --grad-accum
 """
 from __future__ import annotations
 
@@ -19,57 +19,43 @@ from lerobot.configs import PreTrainedConfig
 from lerobot.datasets import EpisodeAwareSampler
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
 from lerobot.policies import make_policy, make_pre_post_processors
-from lerobot.policies.molmoact2.configuration_molmoact2 import MolmoAct2Config
+from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
 from lerobot.utils.collate import lerobot_collate_fn
 from lerobot.utils.constants import ACTION
 
 from shared.common import load_env
 
-from operators.policy.molmoact import DEFAULT_CHECKPOINT, SliderDroppedDataset
+from operators.policy.smolvla import BASE_CHECKPOINT, DEFAULT_OUTPUT_DIR, SliderDroppedDataset
 
 logger = logging.getLogger(__name__)
 
 
-def _build_config(checkpoint: str, device: str, args: argparse.Namespace, image_keys: list[str]) -> MolmoAct2Config:
-    """Load the checkpoint's config (LeRobot format) or start one fresh (raw HF)."""
-    try:
+def _build_config(checkpoint: str, device: str, args: argparse.Namespace) -> SmolVLAConfig:
+    """Load the starting checkpoint's config, or start a fresh action expert."""
+    if checkpoint.strip().lower() in ("", "none", "scratch"):
+        # No SmolVLA weights to inherit: pull the VLM backbone and train the
+        # flow-matching action expert from scratch (needs far more data).
+        config = SmolVLAConfig(load_vlm_weights=True)
+        logger.info("Training a fresh action expert on the %s backbone", config.vlm_model_name)
+    else:
         config = PreTrainedConfig.from_pretrained(checkpoint)
-        if not isinstance(config, MolmoAct2Config):
-            raise TypeError(f"{checkpoint} is a {type(config).__name__}, not MolmoAct2.")
+        if not isinstance(config, SmolVLAConfig):
+            raise TypeError(f"{checkpoint} is a {type(config).__name__}, not SmolVLA.")
         config.pretrained_path = checkpoint
         logger.info("Fine-tuning from LeRobot checkpoint %s", checkpoint)
-    except Exception:
-        config = MolmoAct2Config(checkpoint_path=checkpoint)
-        logger.info("Fine-tuning from original MolmoAct2 HF weights %s", checkpoint)
 
     # Clear inherited features so make_policy re-derives them from our
-    # (slider-dropped) dataset; otherwise the old camera keys and 7-dim state stick.
+    # (slider-dropped) dataset; otherwise the base checkpoint's placeholder
+    # camera keys (camera1..3) stick and our frames match nothing.
     config.input_features = {}
     config.output_features = {}
 
     config.device = device
     config.chunk_size = args.chunk_size
     config.n_action_steps = args.chunk_size
-    config.action_mode = "continuous" if args.train_action_expert_only else args.action_mode
-    config.inference_action_mode = None
-    config.image_keys = image_keys
-    config.model_dtype = args.model_dtype
-    config.gradient_checkpointing = args.gradient_checkpointing
-    config.train_action_expert_only = args.train_action_expert_only
-    config.enable_lora_vlm = args.lora
-    if args.setup_type:
-        config.setup_type = args.setup_type
-    if args.control_mode:
-        config.control_mode = args.control_mode
+    config.freeze_vision_encoder = not args.unfreeze_vision_encoder
+    config.train_expert_only = not args.train_vlm
     return config
-
-
-def _order_cameras(camera_keys: list[str], primary: str, wrist: str) -> list[str]:
-    """Camera keys in policy order: primary (external) first, wrist second."""
-    ordered = [f"observation.images.{name}" for name in (primary, wrist)]
-    ordered = [key for key in ordered if key in camera_keys]
-    ordered += [key for key in camera_keys if key not in ordered]
-    return ordered
 
 
 def _cycle(dataloader: DataLoader):
@@ -78,60 +64,59 @@ def _cycle(dataloader: DataLoader):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Fine-tune MolmoAct2 on a candy-shop dataset.")
+    parser = argparse.ArgumentParser(description="Fine-tune SmolVLA on a candy-shop dataset.")
     parser.add_argument("--dataset", required=True, help="LeRobot dataset repo_id.")
     parser.add_argument("--dataset-root", default=None, help="Local dataset root (skip Hub download).")
-    parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT, help="Starting checkpoint (LeRobot or HF).")
-    parser.add_argument("--output", default="outputs/molmoact2-candy", help="Output dir.")
-    parser.add_argument("--steps", type=int, default=10_000)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--chunk-size", type=int, default=30, help="Action horizon (also = n_action_steps).")
+    parser.add_argument("--checkpoint", default=BASE_CHECKPOINT,
+                        help="Starting SmolVLA checkpoint, or 'scratch' for a fresh action expert.")
+    parser.add_argument("--output", default=DEFAULT_OUTPUT_DIR, help="Output dir.")
+    parser.add_argument("--steps", type=int, default=10_000, help="Optimizer steps (not micro-batches).")
+    parser.add_argument("--batch-size", type=int, default=8, help="Micro-batch; effective batch = this x --grad-accum.")
+    parser.add_argument("--grad-accum", type=int, default=1, help="Micro-batches per optimizer step.")
+    parser.add_argument("--chunk-size", type=int, default=50, help="Action horizon (also = n_action_steps).")
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--model-dtype", default="bfloat16", choices=["float32", "bfloat16", "float16"])
-    parser.add_argument("--action-mode", default="both", choices=["continuous", "discrete", "both"])
-    parser.add_argument("--train-action-expert-only", action="store_true", help="Cheapest fine-tune.")
-    parser.add_argument("--lora", action="store_true", help="LoRA on the VLM (action expert stays full).")
-    parser.add_argument("--gradient-checkpointing", action="store_true")
-    parser.add_argument("--primary-camera", default="overhead_camera")
-    parser.add_argument("--wrist-camera", default="arm_camera")
-    parser.add_argument("--setup-type", default="", help="Prompt text describing the robot/scene.")
-    parser.add_argument("--control-mode", default="", help="Prompt text describing the action space.")
+    parser.add_argument("--train-vlm", action="store_true",
+                        help="Train the VLM alongside the action expert (default: expert only).")
+    parser.add_argument("--unfreeze-vision-encoder", action="store_true",
+                        help="Also train the SigLIP vision encoder (default: frozen).")
     parser.add_argument("--task", default="", help="Fallback instruction if the dataset has no language column.")
     parser.add_argument("--log-freq", type=int, default=20)
     parser.add_argument("--save-freq", type=int, default=2_000)
     parser.add_argument("--video-backend", default="pyav")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # force: importing lerobot installs a root handler, which would make this a no-op
+    # and leave the root logger at WARNING — every INFO line below silently dropped.
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", force=True
+    )
     load_env(pathlib.Path(__file__).resolve().parent)
 
-    # Metadata first: fps + camera keys build delta_timestamps and image-key
-    # order before opening the heavier dataset.
+    # Metadata first: fps builds delta_timestamps before opening the heavier dataset.
     meta = LeRobotDatasetMetadata(args.dataset, root=args.dataset_root)
-    image_keys = _order_cameras(list(meta.camera_keys), args.primary_camera, args.wrist_camera)
     delta_timestamps = {ACTION: [i / meta.fps for i in range(args.chunk_size)]}
-    logger.info("Dataset %s @ %d fps; cameras -> %s", args.dataset, meta.fps, image_keys)
+    logger.info("Dataset %s @ %d fps; cameras -> %s", args.dataset, meta.fps, list(meta.camera_keys))
 
+    # Frames stay float [0, 1] (the dataset default): SmolVLA's own preprocessing
+    # shifts that to SigLIP's [-1, 1] and has no uint8 step to rescale for it.
     dataset = SliderDroppedDataset(
         args.dataset,
         root=args.dataset_root,
         delta_timestamps=delta_timestamps,
         video_backend=args.video_backend,
-        return_uint8=True,
     )
     logger.info(
         "State/action dims after dropping slider.vel: %s",
         dataset.meta.features[ACTION]["names"],
     )
 
-    config = _build_config(args.checkpoint, args.device, args, image_keys)
-    logger.info("Creating policy (this downloads the MolmoAct2 base weights on first run)...")
+    config = _build_config(args.checkpoint, args.device, args)
+    logger.info("Creating policy (this downloads the SmolVLA base weights on first run)...")
     policy = make_policy(cfg=config, ds_meta=dataset.meta)
     preprocessor, postprocessor = make_pre_post_processors(
         policy_cfg=config,
         dataset_stats=dataset.meta.stats,
-        dataset_meta=dataset.meta,
     )
 
     optimizer = config.get_optimizer_preset().build(policy.get_optim_params())
@@ -171,11 +156,18 @@ def main() -> None:
 
     policy.train()
     batches = _cycle(dataloader)
-    logger.info("Training for %d steps (batch=%d) on %s", args.steps, args.batch_size, args.device)
+    logger.info(
+        "Training for %d steps (batch=%d x %d accum = %d) on %s",
+        args.steps, args.batch_size, args.grad_accum, args.batch_size * args.grad_accum, args.device,
+    )
     for step in range(1, args.steps + 1):
-        batch = preprocessor(next(batches))
-        loss, metrics = policy.forward(batch)
-        loss.backward()
+        step_loss = 0.0
+        for _ in range(args.grad_accum):
+            batch = preprocessor(next(batches))
+            loss, metrics = policy.forward(batch)
+            # Mean-over-micro-batches, so grad magnitude matches one big batch.
+            (loss / args.grad_accum).backward()
+            step_loss += float(metrics["loss"]) / args.grad_accum
         torch.nn.utils.clip_grad_norm_(policy.parameters(), grad_clip)
         optimizer.step()
         optimizer.zero_grad()
@@ -184,7 +176,7 @@ def main() -> None:
 
         if step % args.log_freq == 0:
             lr = optimizer.param_groups[0]["lr"]
-            logger.info("step %d/%d loss=%.4f lr=%.2e", step, args.steps, metrics["loss"], lr)
+            logger.info("step %d/%d loss=%.4f lr=%.2e", step, args.steps, step_loss, lr)
 
         if step % args.save_freq == 0 and step < args.steps:
             _save(policy, preprocessor, postprocessor, pathlib.Path(args.output) / "checkpoints" / f"{step:06d}" / "pretrained_model")

@@ -1,14 +1,15 @@
-"""Shared MolmoAct2 wiring for train.py and run.py: default checkpoint and the
-drop-the-slider rule.
+"""Shared SmolVLA wiring for train.py and run.py: the checkpoints, the
+drop-the-slider rule, and the camera mapping.
 
-MolmoAct2's SO-101 checkpoint is a six-DOF arm with no slider, but the leslider
-wire contract carries a 7th ``slider.vel`` field (see ``shared/rest_pose.py``).
-So it is dropped end to end: training slices the column out of tensors, feature
-metadata, and norm stats (:class:`SliderDroppedDataset`); inference feeds the six
-arm ``.pos`` and pins ``slider.vel = 0`` (the ``move_to`` operator owns the slider).
+The policy drives the arm only — the ``move_to`` operator owns the slider — but
+the leslider wire contract carries a 7th ``slider.vel`` field (see
+``shared/rest_pose.py``). So it is dropped end to end: training slices the column
+out of tensors, feature metadata, and norm stats (:class:`SliderDroppedDataset`);
+inference feeds the six arm ``.pos`` and pins ``slider.vel = 0``.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import torch
@@ -18,31 +19,20 @@ from lerobot.utils.constants import ACTION, OBS_STATE
 
 from shared.rest_pose import ARM_POS_KEYS
 
-# Six-DOF, two cameras; ships the SO-100/101 joint-frame correction, so zero-shot
-# deployment needs no extra flags.
-DEFAULT_CHECKPOINT = "lerobot/MolmoAct2-SO100_101-LeRobot"
+# Fine-tune starting point: the 500M SmolVLA base (SmolVLM2 backbone + flow-
+# matching action expert). It carries no normalization stats and its image keys
+# are placeholders (camera1..3), so it is a training start, not a servable
+# checkpoint: there is no zero-shot path, fine-tune on a rig dataset first.
+BASE_CHECKPOINT = "lerobot/smolvla_base"
 
-# The six arm .pos MolmoAct2 controls, in load-bearing wire order.
+# Where policy-train writes. run.py has no default checkpoint: what it serves is
+# always named explicitly (`--checkpoint` / POLICY_CHECKPOINT).
+DEFAULT_OUTPUT_DIR = "outputs/smolvla-candy"
+
+# The six arm .pos the policy controls, in load-bearing wire order.
 ACTION_NAMES: tuple[str, ...] = ARM_POS_KEYS
 
-# Pose the arm is driven to before the first plan, in wire units.
-#
-# The checkpoint normalizes state against its own q01/q99 quantiles and then
-# *clamps*, so a joint outside that range reaches the model pinned at a bin
-# boundary. Parked in the folded rest pose this rig saturates four of six dims
-# (shoulder_lift, elbow_flex, wrist_roll, gripper) and the policy plans nothing:
-# measured on real rig frames, a saturated start yields ~6 units of motion per
-# chunk versus ~96 from an in-range start on the *same* images. These values are
-# a mid-episode state from the checkpoint's own training distribution
-# (Beegbrain/pick_lemon_and_drop_in_bowl), mapped back through the joint bridge.
-START_POSE: dict[str, float] = {
-    "shoulder_pan.pos":   -1.6,
-    "shoulder_lift.pos": -42.9,
-    "elbow_flex.pos":     23.5,
-    "wrist_flex.pos":     84.6,
-    "wrist_roll.pos":     -9.7,
-    "gripper.pos":         1.1,
-}
+logger = logging.getLogger(__name__)
 
 
 def _keep_indices(names: list[str]) -> list[int]:
@@ -94,8 +84,38 @@ class SliderDroppedDataset(LeRobotDataset):
 
 def resolve_image_keys(config: Any) -> list[str]:
     """The ordered ``observation.images.*`` keys the policy expects as input."""
-    if getattr(config, "image_keys", None):
-        return list(config.image_keys)
     from lerobot.configs import FeatureType
 
     return [key for key, feat in config.input_features.items() if feat.type == FeatureType.VISUAL]
+
+
+def resolve_camera_map(config: Any, primary: str, wrist: str) -> dict[str, str]:
+    """Map the policy's image keys onto physical camera names.
+
+    SmolVLA has no image-key override, so a checkpoint fine-tuned on this rig
+    carries the dataset's own keys (``observation.images.overhead_camera``) in
+    the dataset's order — which is alphabetical, arm before overhead. Match on
+    the name first, or a positional map would feed the wrist image in as the
+    overhead view. Keys naming no camera we have fall back to position: primary
+    (overhead) first, wrist second.
+    """
+    physical = [primary, wrist]
+    mapping: dict[str, str] = {}
+    unmatched: list[str] = []
+    for key in resolve_image_keys(config):
+        name = key.rsplit(".", 1)[-1]
+        if name in physical:
+            mapping[key] = name
+        else:
+            unmatched.append(key)
+
+    spare = [name for name in physical if name not in mapping.values()]
+    if len(unmatched) > len(spare):
+        raise RuntimeError(
+            f"policy image keys {unmatched} do not name a wired camera and only {spare} are left "
+            f"to assign by position (cameras: {physical})"
+        )
+    for key, name in zip(unmatched, spare):
+        logger.warning("[policy] image key %s names no wired camera; feeding %s by position", key, name)
+        mapping[key] = name
+    return mapping
