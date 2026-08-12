@@ -26,6 +26,9 @@ htmlcov/
 
 # Model weights / large artifacts
 checkpoints/
+# Recorded datasets and training runs: hundreds of MB each, and rig-specific.
+data/
+outputs/
 
 # Per-rig calibration written by move-to-calibrate (clicked on your own camera)
 operators/move_to/safe_zone.yaml
