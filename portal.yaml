@@ -48,27 +48,27 @@ action_subscription: true
 #     frames are required.
 #   raw: uncompressed RGB24. Largest payload; rarely justified.
 videos:
-  - { name: arm_camera,      codec: h264 }
+  - { name: arm_camera, codec: h264 }
   - { name: overhead_camera, codec: h264 }
 
 # 6 arm motor positions + slider velocity (raw ticks/s).
 state:
-  - { name: shoulder_pan.pos,  dtype: f32 }
+  - { name: shoulder_pan.pos, dtype: f32 }
   - { name: shoulder_lift.pos, dtype: f32 }
-  - { name: elbow_flex.pos,    dtype: f32 }
-  - { name: wrist_flex.pos,    dtype: f32 }
-  - { name: wrist_roll.pos,    dtype: f32 }
-  - { name: gripper.pos,       dtype: f32 }
-  - { name: slider.vel,        dtype: f32 }
+  - { name: elbow_flex.pos, dtype: f32 }
+  - { name: wrist_flex.pos, dtype: f32 }
+  - { name: wrist_roll.pos, dtype: f32 }
+  - { name: gripper.pos, dtype: f32 }
+  - { name: slider.vel, dtype: f32 }
 
 # Action mirrors state: 6 arm `.pos` goals + a slider velocity command.
 # The move_to operator holds the arm (mirroring observed `.pos`) and drives
 # `slider.vel` from its PID; a lerobot policy emits the same shape per tick.
 action:
-  - { name: shoulder_pan.pos,  dtype: f32 }
+  - { name: shoulder_pan.pos, dtype: f32 }
   - { name: shoulder_lift.pos, dtype: f32 }
-  - { name: elbow_flex.pos,    dtype: f32 }
-  - { name: wrist_flex.pos,    dtype: f32 }
-  - { name: wrist_roll.pos,    dtype: f32 }
-  - { name: gripper.pos,       dtype: f32 }
-  - { name: slider.vel,        dtype: f32 }
+  - { name: elbow_flex.pos, dtype: f32 }
+  - { name: wrist_flex.pos, dtype: f32 }
+  - { name: wrist_roll.pos, dtype: f32 }
+  - { name: gripper.pos, dtype: f32 }
+  - { name: slider.vel, dtype: f32 }
