@@ -77,7 +77,10 @@ class Hotkeys:
                   "(drive it from `teleoperator-ui` instead)")
             return
         self._original = termios.tcgetattr(self._fd)
-        tty.setcbreak(self._fd)
+        # A pause already in force (calibration reading stdin) owns the tty; the
+        # reader parks itself and `resume()` takes cbreak once that's done.
+        if not self._paused.is_set():
+            tty.setcbreak(self._fd)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -97,20 +100,23 @@ class Hotkeys:
 
     def pause(self) -> None:
         """Hand stdin back to cooked mode so ``input()`` gets echo + line editing
-        and watched letters aren't swallowed as hotkeys."""
+        and no byte of it is swallowed as a hotkey. Valid before ``start()``."""
         if not self.enabled:
             return
         self._paused.set()
-        self._parked.wait(timeout=1.0)  # let the reader finish any in-flight read
+        if self._thread is not None:
+            self._parked.wait(timeout=1.0)  # let the reader finish any in-flight read
         if self._original is not None:
             termios.tcsetattr(self._fd, termios.TCSADRAIN, self._original)
 
     def resume(self) -> None:
         if not self.enabled:
             return
-        tty.setcbreak(self._fd)
+        if self._original is not None:  # else `start()` hasn't taken the tty yet
+            tty.setcbreak(self._fd)
         with self._lock:
             self._pending = []
+        self._parked.clear()  # before _paused, so the next pause() can't see it stale
         self._paused.clear()
 
     def _run(self) -> None:
@@ -300,44 +306,44 @@ def _us_ms(value) -> Optional[float]:
     return None if value is None else round(value / 1000.0, 1)
 
 
-def _report_drops(recorder: Recorder, max_obs_age_us: int, fps: int) -> None:
-    """Say why rows are being dropped, and what to do about it: the four causes
-    have unrelated fixes."""
-    dropped = recorder.drain_skips()
+def _report_health(recorder: Recorder, fps: int) -> None:
+    """Surface the two ways a recording goes wrong: rows dropped (three causes,
+    unrelated fixes) and rows kept but paired against a lagging observation."""
     causes = recorder.drop_causes
     last_ms, worst_ms = recorder.pairing_age_ms
-    limit_ms = max_obs_age_us // 1000
     obs_fps = recorder.obs_fps
-    print(f"[teleoperator] dropped {dropped} rows in last 5s "
-          f"({' '.join(f'{k}={v}' for k, v in causes.items() if v)}) — "
-          f"obs {obs_fps:.1f}/s of {fps}, queue {recorder.queue_depth}, "
-          f"pairing age last={last_ms:.0f}ms worst={worst_ms:.0f}ms, limit={limit_ms}ms")
 
-    worst = max(causes, key=lambda k: causes[k])
-    if worst == "error":
-        print("[teleoperator]   -> add_frame is failing: a schema or disk problem, not "
-              "timing. The traceback above names it; MAX_OBS_AGE_MS won't help.")
-    elif worst == "backlog":
-        print("[teleoperator]   -> the dataset writer can't keep up — disk or video "
-              "encoder bound. Lower the camera resolution or fps, or write to a "
-              "faster disk.")
-    elif worst == "unpaired":
-        print("[teleoperator]   -> no observation old enough to pair with. Either the obs "
-              "stream is far slower than the action stream, or the action timestamps "
-              "come from a clock behind this machine's (time-sync the hosts).")
-    elif worst == "stale":
-        if not obs_fps:
-            print("[teleoperator]   -> no observations are arriving at all.")
-        elif obs_fps >= fps * 0.8:
-            # Average rate looks healthy but frames arrive in bursts — not a slow camera.
-            print(f"[teleoperator]   -> observations average {obs_fps:.0f}/s but arrive in "
-                  f"bursts: a gap of {worst_ms:.0f}ms is what got paired. Look for "
-                  f"'video stream queue overflow' / 'buffer full' warnings above — "
-                  f"that is the receive path stalling, not a slow camera.")
-        else:
-            print(f"[teleoperator]   -> observations arrive {1000 / obs_fps:.0f}ms apart but "
-                  f"rows must pair within {limit_ms}ms. The robot's video is slow; "
-                  f"raise MAX_OBS_AGE_MS only if you accept the looser alignment.")
+    if recorder.skipped_frames:
+        print(f"[teleoperator] dropped {recorder.drain_skips()} rows in last 5s "
+              f"({' '.join(f'{k}={v}' for k, v in causes.items() if v)}) — "
+              f"obs {obs_fps:.1f}/s of {fps}, queue {recorder.queue_depth}, "
+              f"pairing age last={last_ms:.0f}ms worst={worst_ms:.0f}ms")
+
+        worst = max(causes, key=lambda k: causes[k])
+        if worst == "error":
+            print("[teleoperator]   -> add_frame is failing: a schema or disk problem, not "
+                  "timing. The traceback above names it.")
+        elif worst == "backlog":
+            print("[teleoperator]   -> the dataset writer can't keep up — disk or video "
+                  "encoder bound. Lower the camera resolution or fps, or write to a "
+                  "faster disk.")
+        elif worst == "unpaired":
+            print("[teleoperator]   -> no observation old enough to pair with. Either the obs "
+                  "stream is far slower than the action stream, or the action timestamps "
+                  "come from a clock behind this machine's (time-sync the hosts).")
+
+    # A stalled video no longer costs rows, so it would otherwise be silent here.
+    # `last`, not `worst`: worst never resets within an episode, so it would keep
+    # reporting a stall that has already passed.
+    elif obs_fps and last_ms > 2000 / fps:
+        print(f"[teleoperator] pairing lagging {last_ms:.0f}ms behind the action "
+              f"(worst {worst_ms:.0f}ms this episode, obs {obs_fps:.1f}/s of {fps}). "
+              f"Rows are still recorded; their observations are that far out of date.")
+
+    if recorder.resized_frames:
+        print(f"[teleoperator] {recorder.resized_frames} frames rescaled to the dataset's "
+              f"resolution this episode — the encoder is shedding resolution under "
+              f"congestion. Rows are kept, but their detail is upscaled.")
 
 
 class Runtime:
@@ -377,13 +383,17 @@ class Runtime:
         self.jobs = JobRunner(recorder)
 
     def close(self) -> None:
-        if self.recorder is not None:
-            self.recorder.finalize()
-        if self.leader is not None:
-            try:
-                self.leader.disconnect()
-            except Exception:
-                logger.exception("leader disconnect failed")
+        try:
+            if self.recorder is not None:
+                self.recorder.finalize()
+        finally:
+            # Runs even if finalize raised: leaving the motors driven is its own
+            # failure, and the caller still has an operator to disconnect.
+            if self.leader is not None:
+                try:
+                    self.leader.disconnect()
+                except Exception:
+                    logger.exception("leader disconnect failed")
 
 
 # --- main -------------------------------------------------------------------
@@ -407,7 +417,6 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
     config_path = portal_config_path(PACKAGE_DIR)
     cfg = OperatorConfig.from_yaml_file(config_path, room)
     fps = int(env("PORTAL_FPS", "30"))
-    max_obs_age_us = int(env("MAX_OBS_AGE_MS", "100")) * 1000
     cameras = camera_names(cfg)
 
     env_port = os.environ.get("SO101_LEADER_PORT")
@@ -419,13 +428,27 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
     op = Operator(cfg)
     rt = Runtime()
 
+    # The same rebindable bindings the window uses, so a foot pedal works in
+    # either place. `t`/`x` are terminal-only and stay fixed. Built here, before
+    # anything can reach `open_runtime`, because the open worker pauses these to
+    # hand stdin to calibration; `start()` comes later.
+    keys = shortcuts.load()
+    key_record = shortcuts.terminal_chars(keys, "record")
+    key_discard = shortcuts.terminal_chars(keys, "discard")
+    key_claim = shortcuts.terminal_chars(keys, "claim")
+    # Bindings match before t/x below, so a binding on either would shadow it
+    # silently — warn rather than leave you wondering why `t` stopped working.
+    if clash := ({"t", "x"} & (key_record | key_discard | key_claim)):
+        print(f"[teleoperator] note: {sorted(clash)} is bound to a recording action, "
+              f"so it no longer sets the task / quits in this terminal")
+    hotkeys = Hotkeys({"t", "x"} | key_record | key_discard | key_claim)
+
     def build_recorder(repo_id: str, root, task: str) -> Recorder:
         return Recorder(
             fps=fps,
             state_field_names=[f.name for f in cfg.state_schema],
             action_field_names=[f.name for f in cfg.action_schema],
             cameras=cameras,
-            max_obs_age_us=max_obs_age_us,
             repo_id=repo_id,
             task=task,
             root=root,
@@ -439,6 +462,9 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
         rt.started_at = time.monotonic()
 
         def work() -> None:
+            # lerobot calibrates on this thread by reading stdin, so the hotkey
+            # reader has to let go of the tty first or it eats the ENTER.
+            hotkeys.pause()
             try:
                 rt.open(port=port, leader_id=leader_id,
                         recorder=build_recorder(repo_id, root, task))
@@ -448,6 +474,7 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
             else:
                 print(f"[teleoperator] leader on {port}; dataset {repo_id} -> {root}")
             finally:
+                hotkeys.resume()
                 rt.opening = ""
 
         threading.Thread(target=work, name="open-runtime", daemon=True).start()
@@ -504,7 +531,7 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
         if recorder is None or jobs is None:
             return {**base, "ready": False, "recording": False, "saving": False,
                     "busy": "", "error": "", "task": "", "episodes": 0, "rows": 0,
-                    "dropped": 0, "drop_causes": {}, "obs_fps": 0.0,
+                    "dropped": 0, "drop_causes": {}, "obs_fps": 0.0, "resized": 0,
                     "queue_depth": 0, "pairing_age_ms": [0.0, 0.0], "revision": 0,
                     "repo_id": "", "root": ""}
         return {
@@ -519,6 +546,7 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
             "rows": recorder.rows,
             "dropped": recorder.skipped_frames,
             "drop_causes": recorder.drop_causes,
+            "resized": recorder.resized_frames,
             "obs_fps": round(recorder.obs_fps, 1),
             "queue_depth": recorder.queue_depth,
             "pairing_age_ms": [round(v, 1) for v in recorder.pairing_age_ms],
@@ -706,8 +734,6 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
     ):
         op.register_rpc_method(method, handler)
 
-    # Calibration prompts need cooked-mode stdin, so `Hotkeys.start()` (cbreak)
-    # must not run before it. Keep it that way.
     # ATTR_ROLE lets `teleoperator-ui` find this peer; not under `vla_demo.*` (see protocol).
     attrs = {protocol.ATTR_ROLE: protocol.ROLE_RECORDER}
 
@@ -741,18 +767,6 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
               "machine) to choose a port and a dataset, or set SO101_LEADER_PORT "
               "plus DATASET_REPO_ID/DATASET_ROOT to skip this")
 
-    # The same rebindable bindings the window uses, so a foot pedal works in
-    # either place. `t`/`x` are terminal-only and stay fixed.
-    keys = shortcuts.load()
-    key_record = shortcuts.terminal_chars(keys, "record")
-    key_discard = shortcuts.terminal_chars(keys, "discard")
-    key_claim = shortcuts.terminal_chars(keys, "claim")
-    # Bindings match before t/x below, so a binding on either would shadow it
-    # silently — warn rather than leave you wondering why `t` stopped working.
-    if clash := ({"t", "x"} & (key_record | key_discard | key_claim)):
-        print(f"[teleoperator] note: {sorted(clash)} is bound to a recording action, "
-              f"so it no longer sets the task / quits in this terminal")
-    hotkeys = Hotkeys({"t", "x"} | key_record | key_discard | key_claim)
     print(f"[teleoperator] hotkeys: {shortcuts.describe(keys, 'claim')}=cycle operator  "
           f"{shortcuts.describe(keys, 'record')}=record  "
           f"{shortcuts.describe(keys, 'discard')}=discard  t=set task  x=quit")
@@ -839,8 +853,8 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
 
             # Every 5s: surface dropped rows, and notice the UI window closing.
             if tick % (fps * 5) == 0:
-                if recorder is not None and recorder.skipped_frames > 0:
-                    _report_drops(recorder, max_obs_age_us, fps)
+                if recorder is not None and recorder.is_recording:
+                    _report_health(recorder, fps)
                 ui.poll()
 
     except KeyboardInterrupt:
@@ -870,9 +884,12 @@ def cli() -> None:
              "display is detected). --no-ui records headless.",
     )
     args = parser.parse_args()
+    # force: importing lerobot installs a root handler, which would make this a no-op
+    # and leave the root logger at WARNING — every INFO line below silently dropped.
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
     )
     asyncio.run(main(with_ui=args.ui))
 

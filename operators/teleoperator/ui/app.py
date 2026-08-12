@@ -361,7 +361,6 @@ def draw_session(state: AppState, size: ImVec2) -> None:
         why = {
             "error": "add_frame failing — schema/disk, not timing",
             "unpaired": "nothing to pair with — slow video or clock skew",
-            "stale": f"obs too old to pair ({status.get('obs_fps', 0)}/s)",
             "backlog": "writer can't keep up — disk or encoder bound",
         }.get(worst, "")
         # Wrapped: these run longer than the sidebar and ImGui doesn't wrap by default.
@@ -371,6 +370,12 @@ def draw_session(state: AppState, size: ImVec2) -> None:
                  f"{dropped} dropped — {why}")
             if any(causes.values()):
                 text(theme.FG4, "  ".join(f"{k}={v}" for k, v in causes.items() if v))
+        imgui.pop_text_wrap_pos()
+    if (resized := int(status.get("resized", 0))):
+        imgui.push_text_wrap_pos(0.0)
+        with font(theme.FONTS.small):
+            text(theme.MODERATE, f"{resized} frames rescaled — encoder shedding "
+                                 f"resolution; rows kept, detail upscaled")
         imgui.pop_text_wrap_pos()
     imgui.spacing()
     imgui.separator()

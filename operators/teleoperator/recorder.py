@@ -22,6 +22,10 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+# av, not cv2: lerobot's video encoding already has it loaded here, and adding
+# cv2 alongside it ships a second copy of libavdevice into this process.
+import av
+
 from livekit.portal import Action, Observation, frame_bytes_to_numpy_rgb
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -48,7 +52,6 @@ class Recorder:
         action_field_names: Sequence[str],
         cameras: Sequence[str],
         task: str,
-        max_obs_age_us: int,
         root: str | Path | None = None,
         robot_type: str = "so101_follower",
         history: int = 16,
@@ -60,7 +63,6 @@ class Recorder:
         self._action_field_names = list(action_field_names)
         self._cameras = tuple(cameras)
         self._task = task
-        self._max_obs_age_us = max_obs_age_us
         # expanduser: a DATASET_ROOT of `~/.cache/...` would otherwise create a
         # directory literally named `~`.
         self._root = (
@@ -87,12 +89,18 @@ class Recorder:
         self._pending_saves = 0
         self._queued_rows = 0
         # Drops counted by cause: the causes have unrelated fixes.
-        self._dropped_stale = 0    # paired obs older than max_obs_age_us
         self._dropped_error = 0    # add_frame raised
         self._dropped_unpaired = 0  # no obs old enough to pair with at all
         self._dropped_backlog = 0  # the writer thread couldn't keep up
         self._skips_since_report = 0
         self._warned_write_error = False
+
+        # Resolution the open dataset declares, per camera. The wire can deliver
+        # a different one — the h264 encoder sheds resolution under congestion —
+        # and lerobot validates every frame against the schema fixed at create.
+        self._expected_hw: dict[str, tuple[int, int]] = {}
+        self._resized = 0
+        self._warned_resize: set[str] = set()
 
         # Rolling receive times, for the observed obs rate.
         self._obs_recv: deque[int] = deque(maxlen=64)
@@ -146,16 +154,23 @@ class Recorder:
     @property
     def skipped_frames(self) -> int:
         """Total rows dropped this episode, all causes."""
-        return (self._dropped_stale + self._dropped_error
-                + self._dropped_unpaired + self._dropped_backlog)
+        return (self._dropped_error + self._dropped_unpaired
+                + self._dropped_backlog)
 
     @property
     def drop_causes(self) -> dict[str, int]:
-        """Why rows were dropped this episode: `stale` (paired obs too old),
-        `unpaired` (no obs old enough / action clock behind), `error` (add_frame
-        raised — schema/disk), `backlog` (writer fell behind, queue full)."""
-        return {"stale": self._dropped_stale, "unpaired": self._dropped_unpaired,
+        """Why rows were dropped this episode: `unpaired` (no obs old enough /
+        action clock behind), `error` (add_frame raised — schema/disk),
+        `backlog` (writer fell behind, queue full)."""
+        return {"unpaired": self._dropped_unpaired,
                 "error": self._dropped_error, "backlog": self._dropped_backlog}
+
+    @property
+    def resized_frames(self) -> int:
+        """Frames rescaled to the dataset's resolution this episode. Sustained
+        non-zero means the video path is shedding resolution, and the rows it
+        wrote carry upscaled detail."""
+        return self._resized
 
     @property
     def queue_depth(self) -> int:
@@ -259,6 +274,15 @@ class Recorder:
         # Buffered rows live only in memory, so a hard kill would lose up to 9
         # saved episodes' metadata; with size=1, footer repair recovers them all.
         self._dataset.meta._metadata_buffer_size = 1
+        # Authoritative from here on. On resume these come off disk, where they
+        # may disagree with what the live config would have built — and it is
+        # the stored schema every frame gets validated against.
+        self._features = self._dataset.meta.features
+        self._expected_hw = {
+            cam: (int(shape[0]), int(shape[1]))
+            for cam in self._cameras
+            if (shape := self._features.get(f"{OBS_STR}.images.{cam}", {}).get("shape"))
+        }
         self._episode_count = self._dataset.num_episodes
         # Safe to read disk here and only here: just opened, so every footer is
         # written (repaired above if a prior run died).
@@ -281,12 +305,17 @@ class Recorder:
         ):
             return False
         self._history.clear()
-        self._dropped_stale = self._dropped_error = self._dropped_unpaired = 0
+        # All three, or the survivor outlives its episode and wins `max()` in the
+        # drop report forever, masking whichever cause is actually live.
+        self._dropped_error = 0
+        self._dropped_unpaired = self._dropped_backlog = 0
         self._skips_since_report = 0
         self._last_age_us = self._worst_age_us = 0
         self._rows = 0
         self._queued_rows = 0
         self._warned_write_error = False
+        self._resized = 0
+        self._warned_resize.clear()
         self._recording = True
         return True
 
@@ -325,9 +354,26 @@ class Recorder:
         self._queue.join()
 
     def finalize(self) -> None:
-        self._stop_writer()
-        if self._dataset is not None:
-            self._dataset.finalize()
+        """Land everything on disk and close the dataset.
+
+        The footer write is the one step that must always run: skipping it is
+        what leaves a footerless parquet needing `dataset_repair`. So it sits in
+        a `finally` under everything that could raise."""
+        try:
+            if self._recording:
+                # Quitting mid-episode means the demonstration was never
+                # completed, and a truncated demo teaches the policy to stop
+                # early. Queued ahead of `_stop_writer`'s sentinel, so it lands.
+                self.discard_episode()
+                logger.warning("discarded the in-flight episode on shutdown")
+        except Exception:
+            logger.exception("could not settle the in-flight episode; closing the dataset anyway")
+        finally:
+            try:
+                self._stop_writer()
+            finally:
+                if self._dataset is not None:
+                    self._dataset.finalize()
 
     # --- offline mutation window --------------------------------------------
 
@@ -396,12 +442,13 @@ class Recorder:
             self._dropped_unpaired += 1
             self._skips_since_report += 1
             return
+        # Recorded however old the pairing is. A stalled video freezes the obs
+        # the operator is flying on, so their actions really are a response to
+        # this frame; and lerobot timestamps rows by position, so dropping here
+        # would splice the gap shut and fabricate a jump the arm never made.
+        # `pairing_age_ms` still surfaces the lag.
         self._last_age_us = age
         self._worst_age_us = max(self._worst_age_us, age)
-        if age > self._max_obs_age_us:
-            self._dropped_stale += 1
-            self._skips_since_report += 1
-            return  # would mislabel the row
 
         # Hand off: everything past here costs milliseconds and would be paid on
         # the callback thread (see module docstring).
@@ -424,8 +471,34 @@ class Recorder:
         out: dict = dict(obs.state)
         for cam in self._cameras:
             if (f := obs.frames.get(cam)) is not None:
-                out[cam] = frame_bytes_to_numpy_rgb(f.data, f.width, f.height)
+                out[cam] = self._conform(
+                    cam, frame_bytes_to_numpy_rgb(f.data, f.width, f.height))
         return out
+
+    def _conform(self, cam: str, img):
+        """Rescale a frame that doesn't match the resolution the dataset declares.
+
+        lerobot validates every frame against the schema frozen when the dataset
+        was created, so an unrescaled frame costs the row. The h264 path halves
+        resolution under congestion, which would otherwise drop *every* row for
+        as long as the congestion lasts."""
+        want = self._expected_hw.get(cam)
+        if want is None or img.shape[:2] == want:
+            return img
+        height, width = want
+        if cam not in self._warned_resize:
+            self._warned_resize.add(cam)
+            logger.warning(
+                "%s arrived %dx%d but the dataset declares %dx%d; rescaling to fit. "
+                "Sustained, this is the video encoder shedding resolution under "
+                "congestion, not a camera setting.",
+                cam, img.shape[1], img.shape[0], width, height)
+        self._resized += 1
+        shrinking = img.shape[0] > height
+        return av.VideoFrame.from_ndarray(img, format="rgb24").reformat(
+            width=width, height=height, format="rgb24",
+            interpolation="AREA" if shrinking else "BILINEAR",
+        ).to_ndarray(format="rgb24")
 
     # --- the writer thread --------------------------------------------------
 

@@ -70,7 +70,12 @@ STATUS_KEYS = (
     "task",            # default label for new episodes
     "episodes",        # saved episode count
     "rows",            # rows in the in-flight episode
-    "dropped",         # rows dropped this episode (stale obs / write error)
+    "dropped",         # rows dropped this episode, all causes
+    "drop_causes",     # {unpaired, error, backlog} -> count, this episode
+    "resized",         # frames rescaled to the dataset's resolution this episode
+    "obs_fps",         # observed observation rate
+    "queue_depth",     # rows waiting on the writer thread
+    "pairing_age_ms",  # [last, worst] action-to-observation gap this episode
     "revision",        # bumps when the episode list changes; drives UI refetch
     "repo_id",
     "root",

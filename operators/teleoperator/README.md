@@ -25,7 +25,9 @@ uv run teleoperator-ui         # reattach a window to a running recorder
 Pick the serial port, dataset, and task in the window; a fully-specified
 environment (below) skips the setup screen for unattended runs. If the leader
 arm's stored calibration disagrees with its file, lerobot calibrates **in the
-recorder's terminal**, so watch it the first time a new arm connects.
+recorder's terminal**, so watch it the first time a new arm connects — the
+terminal hotkeys below are suspended until it finishes, since calibration needs
+stdin for its own ENTER prompts.
 
 ## Hotkeys
 
@@ -63,7 +65,6 @@ dataset to open immediately):
 | `DATASET_ROOT` | `$HF_LEROBOT_HOME/<repo-id>` | where the corpus is written |
 | `DATASET_TASK` | `pick up the candy` | initial task label |
 | `PORTAL_FPS` | `30` | tick / record rate |
-| `MAX_OBS_AGE_MS` | `100` | drop a row if the paired observation is older |
 | `LIVEKIT_ROOM` | `candy-shop` | room to join |
 | `TELEOPERATOR_IDENTITY` | `teleoperator` | this peer's identity |
 
