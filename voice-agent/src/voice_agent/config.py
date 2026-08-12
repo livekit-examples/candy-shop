@@ -25,6 +25,6 @@ POSITIONS = {
 
 # Served through LiveKit Inference (no per-provider API keys required).
 STT_MODEL = "deepgram/nova-3"
-LLM_MODEL = "google/gemma-4-31b-it"
+LLM_MODEL = "google/gemini-3.6-flash"
 TTS_MODEL = "inworld/inworld-tts-2"
 TTS_VOICE = "Ashley"

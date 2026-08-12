@@ -9,7 +9,7 @@ All models are served through [LiveKit Inference](https://docs.livekit.io/agents
 | Component      | Model                                        |
 | -------------- | -------------------------------------------- |
 | STT            | `deepgram/nova-3` (multilingual)             |
-| LLM            | `google/gemma-4-31b-it`                      |
+| LLM            | `google/gemini-3.6-flash`                    |
 | TTS            | `inworld/inworld-tts-2` (voice `Ashley`)     |
 | Turn detection | `inference.TurnDetector()`                   |
 | Noise removal  | `ai_coustics` QUAIL_VF_S audio enhancement   |
