@@ -44,6 +44,12 @@ train = [
     "python-dotenv>=1",
     "livekit-api>=0.7",   # train.py -> shared.common.load_env imports livekit.api
 ]
+# operators/policy/skypilot_pi0.yaml: pi0 is PaliGemma 2B + a 300M action expert and
+# needs the `pi` extra on top of the shared training stack.
+train-pi0 = [
+    { include-group = "train" },
+    "lerobot[pi]==0.6.1",
+]
 # operators/reward/skypilot.yaml: SARM's encoding processor imports faker (and the
 # rest of the sarm extra) at construction, so reward training needs it on top of
 # the shared training stack.

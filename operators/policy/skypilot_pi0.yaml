@@ -1,0 +1,80 @@
+# Fine-tune pi0 on the candy-shop dataset — single H100.
+#
+# Launch from the repo root, since relative paths resolve from where `sky` runs:
+#   sky launch -c pi0 operators/policy/skypilot_pi0.yaml
+#
+# Why pi0 and not SmolVLA: ArmnetBench v0.1 (arXiv:2607.24481) evaluated 7 policies on
+# this exact arm (SO-101) at 50 demos/task. SmolVLA came last overall (15.0%), and on
+# eye_drops_to_basket — pick a small object, place it in a container, i.e. this task —
+# it scored 23% against pi0's 70%. pi0 is picked over the benchmark's overall winner
+# pi0.5 (47.6%) because pi0.5's lead comes from folding/insertion/bimanual tasks we do
+# not have, it beat pi0.5 on our task row (70 vs 67), and it is half the parameters to
+# train and to serve at 30fps.
+#
+# Runs lerobot-train directly. Unlike the SmolVLA path there is no SliderDroppedDataset:
+# pi0 pads state and action to max_state_dim/max_action_dim (32), so the 7th `slider.vel`
+# field is harmless on input, and run.py already pins slider.vel = 0 on output because
+# the slider belongs to the move_to operator.
+name: pi0-candy-finetune
+
+workdir: .
+
+resources:
+  accelerators: H100:1
+  disk_size: 512   # GB: PaliGemma weights + HF dataset cache + in-flight checkpoints
+
+envs:
+  CHECKPOINT_BUCKET: candy-shop
+  DATASET_REPO_ID: binhpham/candy-shop
+  RUN_NAME: pi0-candy
+  # PaliGemma 2B + a gemma_300m action expert, ~2.3B trainable. bfloat16 plus gradient
+  # checkpointing is what makes a 50-step chunk fit on one 80 GB card; raise BATCH_SIZE
+  # only after checking mem_gb in the logs.
+  BASE_CHECKPOINT: lerobot/pi0_base
+  BATCH_SIZE: 32
+  STEPS: 30000
+  NUM_WORKERS: 8
+  # Each checkpoint is the full ~2.3B model plus processors, ~9 GB.
+  SAVE_FREQ: 5000
+  VIDEO_BACKEND: torchcodec
+  # pi0_base was pretrained on openpi's camera names. Ours are overhead/arm, so rename
+  # into its slots; it has a third (right_wrist) that we simply do not supply, and
+  # modeling_pi0 pads any missing image key itself.
+  RENAME_MAP: '{"observation.images.overhead_camera": "observation.images.base_0_rgb", "observation.images.arm_camera": "observation.images.left_wrist_0_rgb"}'
+  HF_TOKEN: ""                  # only needed while the dataset/checkpoint repos are private
+
+file_mounts:
+  /outputs:
+    source: nebius://${CHECKPOINT_BUCKET}
+    mode: MOUNT_CACHED
+
+setup: |
+  sudo apt-get update -y
+  sudo apt-get install -y python3-dev libevdev-dev ffmpeg \
+    libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev
+  pip install uv --quiet
+  uv sync --only-group train-pi0
+
+run: |
+  set -euo pipefail
+  nvidia-smi
+
+  # Keep the HF cache on instance disk; /outputs is the bucket and only takes checkpoints.
+  export HF_HOME=~/.cache/huggingface
+
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+  uv run --only-group train-pi0 lerobot-train \
+    --policy.path "$BASE_CHECKPOINT" \
+    --policy.dtype bfloat16 \
+    --policy.gradient_checkpointing true \
+    --dataset.repo_id "$DATASET_REPO_ID" \
+    --dataset.video_backend "$VIDEO_BACKEND" \
+    --rename_map "$RENAME_MAP" \
+    --output_dir "/outputs/$RUN_NAME" \
+    --job_name "$RUN_NAME" \
+    --batch_size "$BATCH_SIZE" \
+    --steps "$STEPS" \
+    --save_freq "$SAVE_FREQ" \
+    --num_workers "$NUM_WORKERS" \
+    --wandb.enable false
