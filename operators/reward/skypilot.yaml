@@ -1,0 +1,106 @@
+# Fine-tune the SARM reward model on the candy-shop dataset — single H100.
+#
+# Relative paths resolve from where `sky` is invoked, so launch from the repo root:
+#   sky launch -c sarm operators/reward/skypilot.yaml
+#   sky jobs launch operators/reward/skypilot.yaml
+#
+# Runs lerobot's own `lerobot-train` rather than a hand-rolled loop. We used to
+# have one, and it silently dropped the gradient clip its optimizer preset asks
+# for; one bad update pushed the tau head's sigmoid into saturation and the run
+# emitted a reward of 0 for 12k steps while the logged loss still looked sane.
+# Upstream's loop clips, and it checkpoints a training_state, so `--resume=true`
+# picks a preempted managed job back up instead of restarting at step 0.
+#
+# lerobot-train refuses to write into an existing --output_dir unless resuming, so a
+# fresh run needs a new RUN_NAME (v2 = the lerobot-train rewrite; sarm-candy holds the
+# collapsed hand-rolled run). To continue an interrupted run instead, keep the name and
+# add --resume true.
+name: sarm-candy-finetune
+
+workdir: .
+
+resources:
+  accelerators: H100:1
+  disk_size: 512   # GB: CLIP weights + HF dataset cache + in-flight checkpoints
+
+envs:
+  CHECKPOINT_BUCKET: candy-shop
+  DATASET_REPO_ID: binhpham/candy-shop
+  RUN_NAME: sarm-candy-v2
+  # Matches SARMConfig's own batch_size default. Each sample carries N_OBS_STEPS
+  # frames, so a step pushes BATCH_SIZE x N_OBS_STEPS images through CLIP —
+  # halve this and double STEPS if it OOMs.
+  BATCH_SIZE: 64
+  # ~16 epochs over 80k frames at batch 64. SARM's scheduler is configured for
+  # 50000 decay steps and auto-scales *down*, so this compresses cleanly and the
+  # cosine still lands on its floor; 50k itself would be ~40 epochs and overfit
+  # a 400-episode corpus.
+  STEPS: 20000
+  # Window = 2 x (N_OBS_STEPS // 2) x FRAME_GAP frames, centred on the scored frame:
+  # +/-60 frames = +/-2s at 30fps, which fits the 5.9s median episode and pads only
+  # the 3.9s p10 tail. 4 x 30 covers that same 2s with 8 frames per sample instead
+  # of 13 — the serial CLIP encode this run is bound by scales with frame count.
+  FRAME_GAP: 30
+  N_OBS_STEPS: 4
+  # Backwards-replay augmentation; SARMConfig requires it < N_OBS_STEPS.
+  MAX_REWIND_STEPS: 3
+  # SARM watches one view; the overhead camera sees the whole workspace, the
+  # wrist camera loses the candy as the gripper closes on it.
+  CAMERA: overhead_camera
+  # Memory-bound, not CPU-bound: each worker parks prefetch_factor=2 batches in
+  # shared memory, and one batch is BATCH_SIZE x 8 frames (the SARM window) x both
+  # cameras at 480x640x3 float32 = ~3.8 GB. 14 workers OOM'd the 196 GB box at the
+  # old 13-frame window; 8 fits and still saturates the 16 vCPUs for decode.
+  NUM_WORKERS: 8
+  # pyav (train.py's default) reseeks per frame; torchcodec ships with the
+  # dataset extra and is much faster for this access pattern.
+  VIDEO_BACKEND: torchcodec
+  SAVE_FREQ: 4000
+  HF_TOKEN: ""                  # only needed while the dataset/checkpoint repos are private
+
+file_mounts:
+  /outputs:
+    source: nebius://${CHECKPOINT_BUCKET}
+    mode: MOUNT_CACHED
+
+setup: |
+  sudo apt-get update -y
+  sudo apt-get install -y python3-dev libevdev-dev ffmpeg \
+    libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev
+  pip install uv --quiet
+  uv sync --only-group train-reward
+
+run: |
+  set -euo pipefail
+  nvidia-smi
+
+  # Keep the HF cache on instance disk; /outputs is the bucket and only takes checkpoints.
+  export HF_HOME=~/.cache/huggingface
+
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+  # train_fast is lerobot-train with operators/reward/clip_patch applied: upstream's SARM
+  # encoder converts every frame numpy -> tobytes() -> PIL before CLIP, which profiled at
+  # 45% of the step and left the H100 at 0%. The patch feeds the fast processor tensors
+  # instead — bit-identical embeddings, 4.2x on the encoder, ~32h -> ~10h for this run.
+  # It lives in the repo rather than as a site-packages edit so `uv sync` cannot undo it.
+  #
+  # --only-group leaves the project uninstalled, so run the module from the workdir.
+  # SARM watches one camera; lerobot wants the full dataset key, not the bare name.
+  uv run --only-group train-reward python -m operators.reward.train_fast \
+    --dataset.repo_id "$DATASET_REPO_ID" \
+    --dataset.video_backend "$VIDEO_BACKEND" \
+    --reward_model.type sarm \
+    --reward_model.annotation_mode single_stage \
+    --reward_model.image_key "observation.images.$CAMERA" \
+    --reward_model.n_obs_steps "$N_OBS_STEPS" \
+    --reward_model.frame_gap "$FRAME_GAP" \
+    --reward_model.max_rewind_steps "$MAX_REWIND_STEPS" \
+    --reward_model.device cuda \
+    --output_dir "/outputs/$RUN_NAME" \
+    --job_name "$RUN_NAME" \
+    --batch_size "$BATCH_SIZE" \
+    --steps "$STEPS" \
+    --save_freq "$SAVE_FREQ" \
+    --num_workers "$NUM_WORKERS" \
+    --wandb.enable false

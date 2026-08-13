@@ -5,23 +5,29 @@ Joins the room as an Operator peer and serves one RPC:
 ``run_task(task)``
   ``task`` is a natural-language instruction (``"pick up the red candy"``). This
   operator does **not** drive the arm itself — it orchestrates the *policy*
-  operator and watches for completion:
+  operator and watches for completion, retrying the whole pick on a deadline:
 
   1. **give active control to the policy** — set the robot's active operator to
      ``policy-operator`` and kick off its ``run_policy`` (which now runs forever).
   2. **monitor** — poll SARM on the incoming camera frames; SARM emits a progress
      reward in ``[0, 1]`` for the task.
-  3. **done** — once progress holds above ``--threshold`` for ``--hold-ticks``
-     polls (or ``--timeout`` elapses), preempt the policy (``stop`` RPC) and
-     release active control (set active operator to ``None``).
-  4. **return** — a JSON summary of how it ended.
+  3. **done** — once progress holds above ``--threshold`` for ``--hold-seconds``,
+     preempt the policy (``stop`` RPC) and release active control.
+  4. **retry** — if the attempt burns its time budget first, stop the policy and
+     start it again on the same instruction. ``run_policy`` folds to the rest pose
+     before it plans, so each retry re-primes the arm from the pose every recorded
+     episode starts at rather than from wherever the failed attempt left it.
+     ``--attempt-budgets`` lists one budget per attempt and defaults to
+     ``10,15,20``: three tries, each given longer than the last, on the theory
+     that a pick that missed is worth more time and not infinite time.
+  5. **return** — a JSON summary: which attempt won, and the time to completion.
 
 So ``run_task`` is a thin, policy-agnostic wrapper: point it at whatever policy
 serves ``run_policy``/``stop`` and it turns "run forever" into "run until done".
 
 Usage::
 
-    uv run reward --checkpoint outputs/sarm-candy/pretrained_model
+    uv run reward --checkpoint outputs/sarm-candy/checkpoints/last/pretrained_model
 """
 from __future__ import annotations
 
@@ -47,7 +53,8 @@ from livekit.portal import (
 
 from shared.common import env_str, load_env, mint_token, required_env
 
-from operators.reward.sarm import ClipEncoder, DEFAULT_CHECKPOINT, ProgressScorer, load_reward_model
+from operators.reward.sarm import (ClipEncoder, DEFAULT_CHECKPOINT, DoneRule, ProgressScorer,
+                                   load_reward_model)
 
 IDENTITY = "reward-operator"
 POLICY_IDENTITY = "policy-operator"
@@ -73,17 +80,28 @@ def _payload_task(data: RpcInvocationData, default: str) -> str:
     return payload
 
 
+def _parse_budgets(raw: str) -> list[float]:
+    """``"10,15,20"`` -> ``[10.0, 15.0, 20.0]``, one time budget per attempt."""
+    try:
+        budgets = [float(part) for part in raw.split(",") if part.strip()]
+    except ValueError:
+        raise SystemExit(f"--attempt-budgets: {raw!r} is not a comma-separated list of seconds")
+    if not budgets or any(b <= 0 for b in budgets):
+        raise SystemExit(f"--attempt-budgets: {raw!r} needs at least one positive budget")
+    return budgets
+
+
 class RewardRunner:
     """Orchestrates the policy and watches SARM for task completion."""
 
     def __init__(self, op: Operator, *, camera: str, scorer: ProgressScorer,
-                 threshold: float, hold_ticks: int, timeout_s: float,
-                 eval_interval_s: float, policy_timeout_s: float) -> None:
+                 threshold: float, hold_s: float, attempt_budgets: list[float],
+                 timeout_s: float, eval_interval_s: float, policy_timeout_s: float) -> None:
         self._op = op
         self._camera = camera
         self._scorer = scorer
-        self._threshold = threshold
-        self._hold_ticks = hold_ticks
+        self._done = DoneRule(threshold, hold_s, eval_interval_s)
+        self._attempt_budgets = attempt_budgets
         self._timeout_s = timeout_s
         self._eval_interval_s = eval_interval_s
         self._policy_timeout_s = policy_timeout_s
@@ -123,33 +141,36 @@ class RewardRunner:
         except Exception:
             logger.exception("[reward] policy run_policy returned an error")
 
-    async def run_task(self, task: str) -> dict:
-        """Give control to the policy, watch SARM until done/timeout, then release."""
-        if self._busy:
-            raise RpcError.Error(code=1409, message="reward operator already running a task", data=None)
-        self._busy = True
-        self._stop.clear()
-        self._scorer.reset()
-        self._scorer.set_task(task)
-        loop = asyncio.get_running_loop()
+    async def _attempt(self, task: str, budget_s: float, index: int, deadline: float | None) -> dict:
+        """One pick: start the policy, watch SARM until done or the budget runs out.
 
-        # Step 1: give active control to the policy, then start it.
+        Always stops the policy on the way out, so the next attempt's ``run_policy``
+        starts from a clean reset and folds to the rest pose before planning.
+        """
+        loop = asyncio.get_running_loop()
+        # A stale window from the previous attempt would be scored against this
+        # one's frames; SARM reads a window, not a single frame.
+        self._scorer.reset()
+        self._done.reset()
+
         await self._op.set_active_operator(POLICY_IDENTITY)
-        logger.info("[reward] run_task(%r): active operator -> %s", task, POLICY_IDENTITY)
+        logger.info("[reward] attempt %d/%d (%.1fs budget): active operator -> %s",
+                    index, len(self._attempt_budgets), budget_s, POLICY_IDENTITY)
         policy_task = await self._start_policy(task)
 
-        # Step 2: monitor SARM until done/timeout/stop.
         t0 = time.monotonic()
         ticks = 0
-        held = 0
         progress = 0.0
-        reason = "timeout"
+        reason = "budget"
         try:
             while True:
                 if self._stop.is_set():
                     reason = "stopped"
                     break
-                if time.monotonic() - t0 > self._timeout_s:
+                if time.monotonic() - t0 > budget_s:
+                    reason = "budget"
+                    break
+                if deadline is not None and time.monotonic() > deadline:
                     reason = "timeout"
                     break
                 if policy_task.done() and policy_task.exception() is not None:
@@ -165,22 +186,59 @@ class RewardRunner:
                 # observations keep flowing in.
                 progress = await loop.run_in_executor(None, self._scorer.progress)
                 ticks += 1
-                held = held + 1 if progress >= self._threshold else 0
-                logger.debug("[reward] tick %d progress=%.3f held=%d", ticks, progress, held)
-                if held >= self._hold_ticks:
+                finished = self._done.push(progress)
+                logger.debug("[reward] attempt %d tick %d progress=%.3f held=%d",
+                             index, ticks, progress, self._done.held)
+                if finished:
                     reason = "done"
                     break
         finally:
-            # Step 3: preempt the policy and release active control.
             await self._stop_policy(policy_task)
+
+        elapsed = time.monotonic() - t0
+        logger.info("[reward] attempt %d ended: reason=%s progress=%.3f ticks=%d elapsed=%.2fs",
+                    index, reason, progress, ticks, elapsed)
+        return {"attempt": index, "budget_s": budget_s, "reason": reason,
+                "progress": progress, "ticks": ticks, "elapsed_s": elapsed}
+
+    async def run_task(self, task: str) -> dict:
+        """Drive the policy through up to ``--attempt-budgets`` picks, then release."""
+        if self._busy:
+            raise RpcError.Error(code=1409, message="reward operator already running a task", data=None)
+        self._busy = True
+        self._stop.clear()
+        self._scorer.set_task(task)
+
+        t_start = time.monotonic()
+        deadline = t_start + self._timeout_s if self._timeout_s > 0 else None
+        attempts: list[dict] = []
+        try:
+            for index, budget_s in enumerate(self._attempt_budgets, start=1):
+                attempt = await self._attempt(task, budget_s, index, deadline)
+                attempts.append(attempt)
+                # Only a spent budget is worth another pick: done is success, and
+                # stopped/timeout/policy_error all mean retrying is wrong or futile.
+                if attempt["reason"] != "budget":
+                    break
+                if deadline is not None and time.monotonic() > deadline:
+                    break
+                logger.info("[reward] attempt %d spent its %.1fs budget; retrying", index, budget_s)
+        finally:
             await self._op.set_active_operator(None)
             self._busy = False
 
-        elapsed = time.monotonic() - t0
-        logger.info("[reward] run_task done: reason=%s progress=%.3f ticks=%d elapsed=%.2fs",
-                    reason, progress, ticks, elapsed)
-        return {"task": task, "reason": reason, "done": reason == "done",
-                "progress": progress, "ticks": ticks, "elapsed_s": elapsed}
+        elapsed = time.monotonic() - t_start
+        last = attempts[-1]
+        # The final attempt's budget expiring means the task itself ran out of tries.
+        reason = "exhausted" if last["reason"] == "budget" else last["reason"]
+        done = reason == "done"
+        logger.info("[reward] run_task done: reason=%s attempts=%d progress=%.3f elapsed=%.2fs",
+                    reason, len(attempts), last["progress"], elapsed)
+        return {"task": task, "reason": reason, "done": done,
+                "progress": last["progress"], "ticks": last["ticks"],
+                "attempts": attempts, "attempt_count": len(attempts),
+                "time_to_completion_s": elapsed if done else None,
+                "elapsed_s": elapsed}
 
 
 async def main() -> None:
@@ -190,12 +248,16 @@ async def main() -> None:
     parser.add_argument("--camera", default=env_str("REWARD_CAMERA", "overhead_camera"),
                         help="Camera SARM watches (must match training).")
     parser.add_argument("--device", default=env_str("REWARD_DEVICE", "cuda" if torch.cuda.is_available() else "cpu"))
-    parser.add_argument("--threshold", type=float, default=float(env_str("REWARD_THRESHOLD", "0.95")),
+    parser.add_argument("--threshold", type=float, default=float(env_str("REWARD_THRESHOLD", "0.7")),
                         help="Progress reward at/above which the task counts as complete.")
-    parser.add_argument("--hold-ticks", type=int, default=int(env_str("REWARD_HOLD_TICKS", "3")),
-                        help="Consecutive polls above threshold before calling it done.")
-    parser.add_argument("--timeout", type=float, default=float(env_str("REWARD_TIMEOUT_S", "30")),
-                        help="Safety cap on a task before releasing regardless of progress.")
+    parser.add_argument("--hold-seconds", type=float, default=float(env_str("REWARD_HOLD_S", "1.0")),
+                        help="Seconds progress must stay above threshold before calling it done.")
+    parser.add_argument("--attempt-budgets", default=env_str("REWARD_ATTEMPT_BUDGETS", "10,15,20"),
+                        help="Comma-separated per-attempt time budgets in seconds. Each budget is "
+                             "one pick; a spent budget restarts the policy, which refolds to the "
+                             "rest pose first. Default '10,15,20' = three tries.")
+    parser.add_argument("--timeout", type=float, default=float(env_str("REWARD_TIMEOUT_S", "0")),
+                        help="Overall safety cap across all attempts (0 = budgets govern).")
     parser.add_argument("--eval-interval", type=float, default=float(env_str("REWARD_EVAL_INTERVAL_S", "1.0")),
                         help="Seconds between SARM polls (also the frame-buffer stride).")
     parser.add_argument("--policy-timeout", type=float, default=float(env_str("REWARD_POLICY_TIMEOUT_S", "10")),
@@ -218,11 +280,16 @@ async def main() -> None:
 
     cfg = OperatorConfig.from_yaml_file(CONFIG_PATH, room)
     op = Operator(cfg)
+    budgets = _parse_budgets(args.attempt_budgets)
     runner = RewardRunner(
         op, camera=args.camera, scorer=scorer,
-        threshold=args.threshold, hold_ticks=args.hold_ticks, timeout_s=args.timeout,
+        threshold=args.threshold, hold_s=args.hold_seconds, attempt_budgets=budgets,
+        timeout_s=args.timeout,
         eval_interval_s=args.eval_interval, policy_timeout_s=args.policy_timeout,
     )
+    logger.info("[reward] threshold=%.2f hold=%.1fs attempt budgets=%s (%.0fs total)",
+                args.threshold, args.hold_seconds,
+                ",".join(f"{b:g}" for b in budgets), sum(budgets))
 
     async def run_task(data: RpcInvocationData) -> str:
         """Run one task: drive the policy, watch SARM, release. Payload: task string or {"task": ...}."""
