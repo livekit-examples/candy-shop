@@ -12,10 +12,11 @@ REWARD_IDENTITY = "reward-operator"
 # while idle: `pick()` clears its stop flag on entry.
 POLICY_IDENTITY = "policy-operator"
 RPC_TIMEOUT_S = 10.0
-# run_task caps a task at the reward operator's 30s safety timeout, then still has
-# to stop the policy and unwind; give the RPC a little headroom over that 30s so it
-# returns its summary rather than being aborted from this side.
-RUN_TASK_TIMEOUT_S = 35.0
+# run_task retries a failed pick on escalating budgets (10+15+20s by default = 45s
+# of picking), and each attempt still has to stop the policy and unwind; give the
+# RPC headroom over that total so it returns its summary rather than being aborted
+# from this side. Raise this in step with the reward operator's --attempt-budgets.
+RUN_TASK_TIMEOUT_S = 60.0
 
 # Named waypoints mapped to raw positions the move service understands.
 POSITIONS = {
@@ -23,8 +24,23 @@ POSITIONS = {
     "drop zone": 70,
 }
 
+# The instruction strings SmolVLA was fine-tuned on, verbatim from the dataset's
+# meta/tasks.parquet. The policy is language-conditioned, so a paraphrase — a
+# capital letter, a missing article, a candy it never saw — is off-distribution
+# and picks worse. Send these exactly; never build an instruction by f-string.
+PICK_TASKS = {
+    "kitkat": "pick up a kitkat",
+    "nerd": "pick up a nerd",
+    "twix": "pick up a twix",
+    "snicker": "pick up a snicker",
+}
+
+# One fixed drop instruction, and it never names the candy — the policy was
+# trained to put whatever it is holding into the black circle.
+DROP_TASK = "drop candy into the black circle"
+
 # Served through LiveKit Inference (no per-provider API keys required).
 STT_MODEL = "deepgram/nova-3"
 LLM_MODEL = "google/gemini-3.6-flash"
-TTS_MODEL = "inworld/inworld-tts-2"
-TTS_VOICE = "Ashley"
+TTS_MODEL = "fishaudio/s2.1-pro"
+TTS_VOICE = "9a9cf47702da476aa4629e2506d4a857"

@@ -23,7 +23,10 @@ envs:
   # effective batch in one micro-batch; GRAD_ACCUM is there for smaller cards.
   BATCH_SIZE: 64
   GRAD_ACCUM: 1
-  STEPS: 20000
+  # 30k is where lerobot's SmolVLA scheduler lands: its cosine decay is configured
+  # for 30000 steps and only auto-scales *down*, so anything past this runs at the
+  # 2.5e-6 floor LR. ~24 epochs over 80k frames at effective batch 64.
+  STEPS: 30000
   NUM_WORKERS: 8
   # Each checkpoint is the full ~500M model plus processors, ~2 GB.
   SAVE_FREQ: 5000
