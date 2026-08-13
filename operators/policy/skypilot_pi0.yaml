@@ -15,6 +15,13 @@
 # pi0 pads state and action to max_state_dim/max_action_dim (32), so the 7th `slider.vel`
 # field is harmless on input, and run.py already pins slider.vel = 0 on output because
 # the slider belongs to the move_to operator.
+# PREREQUISITE — pi0 builds its tokenizer from google/paligemma-3b-pt-224, which is a
+# gated repo. Neither lerobot/pi0_base nor lerobot/pi05_base bundles the tokenizer, so
+# there is no ungated path. Before launching:
+#   1. accept the license at https://huggingface.co/google/paligemma-3b-pt-224
+#   2. pass a read token from that same account: `--env HF_TOKEN=hf_...`
+# Without it the run dies in setup with GatedRepoError on tokenizer_processor. SmolVLA
+# never needed this because SmolVLM2 is ungated.
 name: pi0-candy-finetune
 
 workdir: .
@@ -67,6 +74,7 @@ run: |
   uv run --only-group train-pi0 lerobot-train \
     --policy.path "$BASE_CHECKPOINT" \
     --policy.dtype bfloat16 \
+    --policy.push_to_hub false \
     --policy.gradient_checkpointing true \
     --dataset.repo_id "$DATASET_REPO_ID" \
     --dataset.video_backend "$VIDEO_BACKEND" \
