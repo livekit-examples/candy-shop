@@ -1,8 +1,9 @@
 """Shared SARM reward-model wiring for the candy-shop reward operator.
 
-Everything both ``train.py`` and ``run.py`` need to agree on lives here so the
-two never drift: the default checkpoint, the single image key, and the online
-progress scorer.
+Everything ``run.py`` and ``debug_reward.py`` need to agree on lives here so the
+two never drift: the default checkpoint, the single image key, the completion
+rule, and the online progress scorer. Training itself is lerobot's
+``lerobot-train`` (see ``skypilot.yaml``), not a loop of ours.
 
 What SARM is
 ------------
@@ -40,8 +41,9 @@ from lerobot.utils.constants import OBS_IMAGES
 
 logger = logging.getLogger(__name__)
 
-# Trained locally by train.py; there is no released candy-shop SARM checkpoint.
-DEFAULT_CHECKPOINT = "outputs/sarm-candy/pretrained_model"
+# Trained by `lerobot-train` (see operators/reward/skypilot.yaml); there is no released
+# candy-shop SARM checkpoint. "last" is the symlink lerobot repoints after each save.
+DEFAULT_CHECKPOINT = "outputs/sarm-candy-v2/checkpoints/last/pretrained_model"
 
 # The CLIP encoder SARM was trained against (see processor_sarm.py). SARM eats
 # CLIP embeddings, so inference must use the exact same encoder.
@@ -104,13 +106,47 @@ class ClipEncoder:
         return self._pooled(self._model.get_text_features(**inputs)).detach().cpu()[0]
 
 
+class DoneRule:
+    """The completion test: progress at/above ``threshold`` for ``hold_s``.
+
+    Shared by the live operator and the offline debug driver so a threshold
+    calibrated by one means the same thing to the other. Held in polls rather
+    than wall-clock seconds because that is what both loops actually count —
+    the tick count is derived from the poll interval once, here.
+    """
+
+    def __init__(self, threshold: float, hold_s: float, eval_interval_s: float) -> None:
+        self.threshold = threshold
+        self.hold_ticks = max(1, round(hold_s / eval_interval_s))
+        self._held = 0
+
+    def reset(self) -> None:
+        self._held = 0
+
+    @property
+    def held(self) -> int:
+        return self._held
+
+    def push(self, progress: float) -> bool:
+        """Feed one poll's progress; True once it has held above threshold long enough."""
+        self._held = self._held + 1 if progress >= self.threshold else 0
+        return self._held >= self.hold_ticks
+
+
 class ProgressScorer:
     """Rolls a window of recent frames through CLIP+SARM into a progress reward.
 
-    Online use is causal: SARM was trained on a frame window centred on the target
-    frame, but we only ever have the past, so we buffer the most recent
-    ``n_obs_steps + 1`` frames (sampled ~``frame_gap`` apart by the caller's poll
-    cadence) and score the newest one. Good enough for a done-detector.
+    Online use is causal. SARM trains on a bidirectional window
+    ``[-2g, -g, 0, +g, +2g]`` around a target frame (``compute_absolute_indices``),
+    which we cannot build live because the last two slots are in the future. Instead
+    we buffer the most recent ``n_obs_steps + 1`` frames, sampled ~``frame_gap``
+    apart by the caller's poll cadence, and read the *last* slot: that window has
+    the same shape training used, just shifted back so its centre sits at
+    ``t - 2g``, which puts the newest frame exactly where training put ``+2g``.
+
+    Short buffers repeat the oldest frame rather than passing a stub window, since
+    training pads the same way — it clamps out-of-bounds indices to the episode
+    boundary, duplicating that frame.
     """
 
     def __init__(self, model: torch.nn.Module, config: SARMConfig, encoder: ClipEncoder) -> None:
@@ -138,9 +174,11 @@ class ProgressScorer:
         if not self.ready:
             raise RuntimeError("scorer needs a task and at least one frame")
         frames = list(self._frames)
+        window = self._frames.maxlen
+        frames = [frames[0]] * (window - len(frames)) + frames
         video = self._encoder.encode_images(frames).unsqueeze(0)  # (1, T, 512)
         text = self._text_emb.unsqueeze(0)  # (1, 512)
         reward = self._model.calculate_rewards(
-            text, video, state_features=None, frame_index=len(frames) - 1, head_mode="sparse"
+            text, video, state_features=None, frame_index=window - 1, head_mode="sparse"
         )
         return float(np.asarray(reward).reshape(-1)[-1])

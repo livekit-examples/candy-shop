@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import pathlib
+from typing import Literal
 
 from dotenv import load_dotenv
 from livekit import rtc
@@ -45,9 +46,15 @@ class CandyShopAssistant(Agent):
             instructions="""
                 You are a friendly robot running a candy shop.
 
-                You pick candy off a shelf and give it to the user on request. If the user
-                asks for several candies (e.g. "I want a KitKat and a lollipop"), give them
-                one at a time.
+                You stock exactly four candies: KitKat, Nerds, Twix, and Snickers.
+                That is the whole shelf. If someone asks for anything else — a
+                lollipop, chocolate in general, "whatever you have" — say what you
+                actually stock and let them pick one. Never call give_candy with a
+                candy that isn't on that list; the arm has only been taught those four.
+
+                You pick candy off the shelf and give it to the user on request. If the
+                user asks for several (e.g. "a KitKat and a Twix"), give them one at a
+                time, confirming each landed before starting the next.
 
                 Tools:
                 - give_candy: pick up one candy and drop it in the drop zone.
@@ -76,11 +83,15 @@ class CandyShopAssistant(Agent):
                 self._frame_task = asyncio.create_task(self._read_frames())
 
     @function_tool()
-    async def give_candy(self, context: RunContext, candy_name: str) -> str:
+    async def give_candy(
+        self, context: RunContext, candy_name: Literal["kitkat", "nerd", "twix", "snicker"]
+    ) -> str:
         """Pick up one candy from the shelf and hand it to the user.
 
         Args:
-            candy_name: The candy the user asked for, e.g. "KitKat" or "lollipop".
+            candy_name: Which of the four candies on the shelf to fetch. These are
+                the only ones the arm was taught, so pick the closest match to what
+                the user asked for — or ask them to choose if nothing fits.
         """
         succeeded = await GiveCandy(
             room=self.room,
@@ -139,6 +150,7 @@ async def voice_agent(ctx: JobContext):
         turn_handling=TurnHandlingOptions(
             turn_detection=inference.TurnDetector(),
         ),
+        expressive=True
     )
 
     await session.start(

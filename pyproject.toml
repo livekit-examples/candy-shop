@@ -29,7 +29,7 @@ policy = "operators.policy.run:cli"
 policy-debug = "operators.policy.debug_policy:cli"
 policy-train = "operators.policy.train:cli"
 reward = "operators.reward.run:cli"
-reward-train = "operators.reward.train:cli"
+reward-debug = "operators.reward.debug_reward:cli"
 teleoperator = "operators.teleoperator.run:cli"
 teleoperator-ui = "operators.teleoperator.ui.app:cli"
 
@@ -43,6 +43,13 @@ train = [
     "numpy>=1.24",
     "python-dotenv>=1",
     "livekit-api>=0.7",   # train.py -> shared.common.load_env imports livekit.api
+]
+# operators/reward/skypilot.yaml: SARM's encoding processor imports faker (and the
+# rest of the sarm extra) at construction, so reward training needs it on top of
+# the shared training stack.
+train-reward = [
+    { include-group = "train" },
+    "lerobot[sarm]==0.6.1",
 ]
 
 [[tool.uv.index]]

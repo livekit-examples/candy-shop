@@ -8,7 +8,9 @@ from livekit import rtc
 from livekit.agents import AgentTask, RunContext, function_tool
 
 from voice_agent.config import (
+    DROP_TASK,
     MOVE_TO_IDENTITY,
+    PICK_TASKS,
     POLICY_IDENTITY,
     POSITIONS,
     REWARD_IDENTITY,
@@ -68,13 +70,13 @@ class GiveCandy(AgentTask[bool]):
             await self._move_to("candy shelf")
 
             self.session.say(f"Picking up your {self.candy_name}.")
-            await self._run_task(f"Pick up {self.candy_name}")
+            await self._run_task(PICK_TASKS[self.candy_name])
 
             self.session.say("Bringing it over to you.")
             await self._move_to("drop zone")
 
             self.session.say("And here you go!")
-            await self._run_task(f"Drop {self.candy_name}")
+            await self._run_task(DROP_TASK)
         except asyncio.CancelledError:
             # Teardown is the canceller's job — it can await cleanly.
             raise
