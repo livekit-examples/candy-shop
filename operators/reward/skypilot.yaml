@@ -56,6 +56,11 @@ envs:
   # dataset extra and is much faster for this access pattern.
   VIDEO_BACKEND: torchcodec
   SAVE_FREQ: 4000
+  # Set to resume an interrupted run instead of starting a fresh one, e.g.
+  #   --env RESUME_ARGS="--config_path /outputs/sarm-candy-v2/checkpoints/004000/pretrained_model --resume true"
+  # lerobot reloads the whole config (and the optimizer/scheduler/RNG state) from the
+  # checkpoint, so the training flags below are neither needed nor allowed alongside it.
+  RESUME_ARGS: ""
   HF_TOKEN: ""                  # only needed while the dataset/checkpoint repos are private
 
 file_mounts:
@@ -87,6 +92,12 @@ run: |
   #
   # --only-group leaves the project uninstalled, so run the module from the workdir.
   # SARM watches one camera; lerobot wants the full dataset key, not the bare name.
+  if [ -n "${RESUME_ARGS:-}" ]; then
+    echo "resuming: $RESUME_ARGS"
+    uv run --only-group train-reward python -m operators.reward.train_fast $RESUME_ARGS
+    exit $?
+  fi
+
   uv run --only-group train-reward python -m operators.reward.train_fast \
     --dataset.repo_id "$DATASET_REPO_ID" \
     --dataset.video_backend "$VIDEO_BACKEND" \

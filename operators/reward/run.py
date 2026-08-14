@@ -52,9 +52,10 @@ from livekit.portal import (
 )
 
 from shared.common import env_str, load_env, mint_token, required_env
+from shared.rest_pose import ALL_ACTION_KEYS
 
 from operators.reward.sarm import (ClipEncoder, DEFAULT_CHECKPOINT, DoneRule, ProgressScorer,
-                                   load_reward_model)
+                                   StateNormalizer, load_reward_model)
 
 IDENTITY = "reward-operator"
 POLICY_IDENTITY = "policy-operator"
@@ -106,6 +107,7 @@ class RewardRunner:
         self._eval_interval_s = eval_interval_s
         self._policy_timeout_s = policy_timeout_s
         self._frame: np.ndarray | None = None
+        self._state: np.ndarray | None = None
         self._stop = asyncio.Event()
         self._busy = False
         op.on_observation(self._on_observation)
@@ -114,6 +116,9 @@ class RewardRunner:
         frame = obs.frames.get(self._camera)
         if frame is not None:
             self._frame = frame_bytes_to_numpy_rgb(frame.data, frame.width, frame.height)
+        # SARM reads arm pose as well as pixels; without it the progress curve goes flat.
+        if obs.state:
+            self._state = np.array([obs.state[k] for k in ALL_ACTION_KEYS], dtype=np.float32)
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -178,10 +183,10 @@ class RewardRunner:
                     break
 
                 await asyncio.sleep(self._eval_interval_s)
-                if self._frame is None:
+                if self._frame is None or self._state is None:
                     continue
 
-                self._scorer.push(self._frame)
+                self._scorer.push(self._frame, self._state)
                 # Inference is synchronous and heavy; keep the event loop free so
                 # observations keep flowing in.
                 progress = await loop.run_in_executor(None, self._scorer.progress)
@@ -276,7 +281,8 @@ async def main() -> None:
 
     model, config = load_reward_model(args.checkpoint, args.device)
     encoder = ClipEncoder(args.device)
-    scorer = ProgressScorer(model, config, encoder)
+    scorer = ProgressScorer(model, config, encoder,
+                            StateNormalizer.from_checkpoint(args.checkpoint))
 
     cfg = OperatorConfig.from_yaml_file(CONFIG_PATH, room)
     op = Operator(cfg)

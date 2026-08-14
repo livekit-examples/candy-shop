@@ -51,7 +51,7 @@ import torch
 from shared.common import env_str, load_env
 
 from operators.reward.sarm import (ClipEncoder, DEFAULT_CHECKPOINT, DoneRule, ProgressScorer,
-                                   image_key_for, load_reward_model)
+                                   StateNormalizer, image_key_for, load_reward_model)
 
 # Coarse enough to read at a glance, fine enough to see the curve's shape.
 SPARK = " ▁▂▃▄▅▆▇█"
@@ -102,7 +102,10 @@ def _score_episode(dataset, scorer: ProgressScorer, image_key: str,
     scorer.reset()
     scores = []
     for index in range(start, stop, stride):
-        scorer.push(_to_rgb_frame(dataset[index][image_key]))
+        item = dataset[index]
+        state = item.get("observation.state")
+        scorer.push(_to_rgb_frame(item[image_key]),
+                    None if state is None else state.numpy())
         scores.append(scorer.progress())
     return scores
 
@@ -195,7 +198,8 @@ def main() -> None:
     stops = dataset.meta.episodes["dataset_to_index"]
 
     model, config = load_reward_model(args.checkpoint, args.device)
-    scorer = ProgressScorer(model, config, ClipEncoder(args.device))
+    scorer = ProgressScorer(model, config, ClipEncoder(args.device),
+                            StateNormalizer.from_checkpoint(args.checkpoint))
     rule = DoneRule(args.threshold, args.hold_seconds, args.eval_interval)
 
     print(f"\n{args.checkpoint}\n{args.dataset} @ {fps}fps, watching {image_key}\n"
