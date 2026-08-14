@@ -271,7 +271,7 @@ async def main() -> None:
     parser.add_argument("--camera", default=env_str("REWARD_CAMERA", "overhead_camera"),
                         help="Camera SARM watches (must match training).")
     parser.add_argument("--device", default=env_str("REWARD_DEVICE", "cuda" if torch.cuda.is_available() else "cpu"))
-    parser.add_argument("--threshold", type=float, default=float(env_str("REWARD_THRESHOLD", "0.7")),
+    parser.add_argument("--threshold", type=float, default=float(env_str("REWARD_THRESHOLD", "0.97")),
                         help="Progress reward at/above which the task counts as complete.")
     parser.add_argument("--hold-seconds", type=float, default=float(env_str("REWARD_HOLD_S", "1.0")),
                         help="Seconds progress must stay above threshold before calling it done.")

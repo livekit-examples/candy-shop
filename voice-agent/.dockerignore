@@ -24,10 +24,10 @@ dist/
 .env
 .env.*
 
-# VCS, docs, editor, OS
+# VCS, editor, OS. README.md stays: pyproject's `readme` field points at it, so
+# uv_build cannot build the package without it.
 .git
 .gitignore
-README.md
 .idea/
 .vscode/
 .DS_Store

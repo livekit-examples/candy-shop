@@ -70,19 +70,23 @@ LiveKit Cloud builds the image from the `Dockerfile` here and runs `voice-agent
 start` on its own infrastructure. Run all of these from this directory — the
 build context is `voice-agent/`, not the repo root.
 
-First deploy. This registers the agent, assigns it an id, and writes
-`livekit.toml` (commit that file):
+Already done once — the agent is `CA_eGcynJ2axibZ` in the `robotics-examples`
+project, region `us-east`, recorded in `livekit.toml`. To stand up another one:
 
 ```shell
-lk agent create --project <livekit-cloud-project> .
+lk agent create --project <livekit-cloud-project> --region us-east .
 ```
+
+`--region` is mandatory whenever stdin isn't a terminal, and only `us-east`
+(Virginia), `eu-central` (Frankfurt), and `ap-south` (Mumbai) exist. It is fixed
+for the life of the agent — moving means delete and recreate.
 
 Afterwards:
 
 ```shell
 lk agent deploy     # build and roll out a new version
 lk agent status     # replicas, CPU, memory
-lk agent logs       # tail runtime logs
+lk agent logs       # tail runtime logs (--log-type=build for the image build)
 lk agent rollback   # back to the previous version
 ```
 
