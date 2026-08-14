@@ -161,6 +161,8 @@ def main() -> None:
                         help="LeRobot dataset repo_id (defaults to $DATASET_REPO_ID).")
     parser.add_argument("--dataset-root", default=env_str("DATASET_ROOT", "") or None,
                         help="Local dataset root (skip Hub download).")
+    parser.add_argument("--no-values", action="store_true",
+                        help="Print only the sparkline, not the per-poll reward numbers.")
     parser.add_argument("--episodes", default="0-9",
                         help="Episodes to score: '0-9', '0,5,7', or 'all'. Default '0-9'.")
     parser.add_argument("--camera", default=env_str("REWARD_CAMERA", "overhead_camera"),
@@ -234,6 +236,11 @@ def main() -> None:
         print(f"{episode:>5} {stop - start:>7} {duration_s:>6.1f}s  "
               f"{_sparkline(scores):<26} {result['peak']:>5.2f} {result['final']:>6.2f} "
               f"{done_cell:>7} {lead_cell:>7}")
+        if not args.no_values:
+            # The poll at which the rule trips is marked, so "done@" is checkable by eye.
+            cells = [f"{'*' if done_index is not None and i == done_index else ''}{v:.2f}"
+                     for i, v in enumerate(scores)]
+            print(f"{'':>5} {'rewards':>7} {'':>7}  " + " ".join(cells))
 
     _summarize(results, args.eval_interval)
     _sweep(results, args.hold_seconds, args.eval_interval)

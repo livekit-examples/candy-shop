@@ -43,6 +43,11 @@ CONFIG_PATH = pathlib.Path(__file__).resolve().parent.parent.parent / "portal.ya
 # pose we plan from. Arm keys only — the ramp pins the slider itself.
 START_POSE: dict[str, float] = {key: RESET_POSE_DEFAULTS[key] for key in ARM_POS_KEYS}
 
+# The worst-case fold `--start-ramp` is sized for: the elbow-up rest the rig can settle
+# into is ~60 units from START_POSE. Shorter moves scale down from here, so the ramp caps
+# slew rate (~60 units per --start-ramp seconds) instead of costing a flat delay.
+RAMP_REFERENCE_UNITS = 60.0
+
 logger = logging.getLogger(__name__)
 
 
@@ -156,20 +161,30 @@ class PolicyRunner:
     async def _goto_start(self) -> bool:
         """Fold the arm to ``START_POSE`` before the first plan.
 
-        Ramped over ``start_ramp_s`` rather than commanded as one absolute jump:
-        the target can be 60+ units away and the follower would otherwise slew
-        there at full speed. Returns False only if stopped mid-approach; a joint
-        that never arrives is logged and the pick proceeds anyway.
+        Ramped rather than commanded as one absolute jump: the target can be 60+
+        units away and the follower would otherwise slew there at full speed.
+
+        The ramp is a cap on *slew rate*, not a fixed duration, so it scales with
+        how far the arm actually has to travel — ``start_ramp_s`` is the time for
+        the worst case (:data:`RAMP_REFERENCE_UNITS`) and anything closer is
+        proportionally quicker. A retry usually starts near the rest pose already,
+        and spending the full budget interpolating from here to nearly-here just
+        made every attempt feel slow.
+
+        Returns False only if stopped mid-approach; a joint that never arrives is
+        logged and the pick proceeds anyway.
         """
         if not all(key in self._state for key in ARM_POS_KEYS):
             return True
 
         origin = {key: float(self._state[key]) for key in ARM_POS_KEYS}
         gap = max(abs(START_POSE[key] - origin[key]) for key in ARM_POS_KEYS)
-        logger.info("[policy] priming to start pose (max joint move %.1f)", gap)
+        logger.info("[policy] priming to start pose (max joint move %.1f, ramp %.2fs)",
+                    gap, self._start_ramp_s * min(1.0, gap / RAMP_REFERENCE_UNITS))
 
-        ramp_ticks = max(1, int(self._start_ramp_s * self._fps))
-        deadline = time.monotonic() + self._start_ramp_s + self._settle.timeout_s
+        ramp_s = self._start_ramp_s * min(1.0, gap / RAMP_REFERENCE_UNITS)
+        ramp_ticks = max(1, int(ramp_s * self._fps))
+        deadline = time.monotonic() + ramp_s + self._settle.timeout_s
         tick = 0
         async for _ in pace(self._fps):
             if self._stop.is_set():

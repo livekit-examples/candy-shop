@@ -97,7 +97,8 @@ class RewardRunner:
 
     def __init__(self, op: Operator, *, camera: str, scorer: ProgressScorer,
                  threshold: float, hold_s: float, attempt_budgets: list[float],
-                 timeout_s: float, eval_interval_s: float, policy_timeout_s: float) -> None:
+                 timeout_s: float, eval_interval_s: float, policy_timeout_s: float,
+                 retry_pause_s: float = 1.0) -> None:
         self._op = op
         self._camera = camera
         self._scorer = scorer
@@ -106,6 +107,7 @@ class RewardRunner:
         self._timeout_s = timeout_s
         self._eval_interval_s = eval_interval_s
         self._policy_timeout_s = policy_timeout_s
+        self._retry_pause_s = retry_pause_s
         self._frame: np.ndarray | None = None
         self._state: np.ndarray | None = None
         self._stop = asyncio.Event()
@@ -200,8 +202,9 @@ class RewardRunner:
                 progress = await loop.run_in_executor(None, self._scorer.progress)
                 ticks += 1
                 finished = self._done.push(progress)
-                logger.debug("[reward] attempt %d tick %d progress=%.3f held=%d",
-                             index, ticks, progress, self._done.held)
+                logger.info("[reward] attempt %d/%d t=%4.1fs reward=%.3f (thr %.2f, held %d/%d)",
+                            index, len(self._attempt_budgets), time.monotonic() - t0,
+                            progress, self._done.threshold, self._done.held, self._done.hold_ticks)
                 if finished:
                     reason = "done"
                     break
@@ -235,7 +238,14 @@ class RewardRunner:
                     break
                 if deadline is not None and time.monotonic() > deadline:
                     break
-                logger.info("[reward] attempt %d spent its %.1fs budget; retrying", index, budget_s)
+                # Settle before going again: a failed pick often leaves the candy rolling
+                # or the gripper mid-close, and the next attempt plans from whatever the
+                # camera sees the instant it starts. Straight back-to-back retries also
+                # read as thrashing on the rig.
+                logger.info("[reward] attempt %d spent its %.1fs budget; pausing %.1fs then retrying",
+                            index, budget_s, self._retry_pause_s)
+                if self._retry_pause_s > 0:
+                    await asyncio.sleep(self._retry_pause_s)
         finally:
             await self._op.set_active_operator(None)
             self._busy = False
@@ -273,6 +283,8 @@ async def main() -> None:
                         help="Overall safety cap across all attempts (0 = budgets govern).")
     parser.add_argument("--eval-interval", type=float, default=float(env_str("REWARD_EVAL_INTERVAL_S", "1.0")),
                         help="Seconds between SARM polls (also the frame-buffer stride).")
+    parser.add_argument("--retry-pause", type=float, default=float(env_str("REWARD_RETRY_PAUSE_S", "1.0")),
+                        help="Seconds to wait between a spent attempt and the next one.")
     parser.add_argument("--policy-timeout", type=float, default=float(env_str("REWARD_POLICY_TIMEOUT_S", "60")),
                         help="Timeout for the stop RPC / policy unwind.")
     args = parser.parse_args()
@@ -300,6 +312,7 @@ async def main() -> None:
         threshold=args.threshold, hold_s=args.hold_seconds, attempt_budgets=budgets,
         timeout_s=args.timeout,
         eval_interval_s=args.eval_interval, policy_timeout_s=args.policy_timeout,
+        retry_pause_s=args.retry_pause,
     )
     logger.info("[reward] threshold=%.2f hold=%.1fs attempt budgets=%s (%.0fs total)",
                 args.threshold, args.hold_seconds,
