@@ -11,12 +11,16 @@ REWARD_IDENTITY = "reward-operator"
 # that misses a policy started directly from the Playground console. Safe to send
 # while idle: `pick()` clears its stop flag on entry.
 POLICY_IDENTITY = "policy-operator"
-RPC_TIMEOUT_S = 10.0
-# run_task retries a failed pick on escalating budgets (10+15+20s by default = 45s
-# of picking), and each attempt still has to stop the policy and unwind; give the
-# RPC headroom over that total so it returns its summary rather than being aborted
-# from this side. Raise this in step with the reward operator's --attempt-budgets.
-RUN_TASK_TIMEOUT_S = 60.0
+# One minute floor on every RPC. These cross a relay to an operator that may be mid-
+# motion, and an aborted RPC leaves the caller guessing while the robot keeps moving —
+# far worse than waiting. move_to alone can run its own TIMEOUT_S of 20s, which the old
+# 10s here would have cut off mid-travel.
+RPC_TIMEOUT_S = 60.0
+# run_task retries a failed pick on escalating budgets (10+15+20s by default = 45s of
+# picking) plus a retry pause between each and a policy unwind after each; 60s left only
+# 13s for all of that, so a single slow unwind on the third attempt would abort the RPC
+# from this side while the arm was still working. Raise in step with --attempt-budgets.
+RUN_TASK_TIMEOUT_S = 90.0
 
 # Named waypoints mapped to raw positions the move service understands.
 POSITIONS = {

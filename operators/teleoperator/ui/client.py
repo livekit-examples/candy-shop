@@ -24,9 +24,11 @@ from operators.teleoperator import protocol
 
 logger = logging.getLogger(__name__)
 
-# Long enough to cross a relay, short enough that probing a peer which turns out
-# not to be the teleoperator fails fast.
-RPC_TIMEOUT_S = 5.0
+# One minute floor, matching the rest of the operators: these cross a relay to a peer
+# that may be busy driving the arm, and a premature abort is worse than waiting. Probing
+# a peer that is not the teleoperator still fails fast — that returns an error rather
+# than hanging, so the timeout is not what bounds it.
+RPC_TIMEOUT_S = 60.0
 
 
 class RecorderClient:
