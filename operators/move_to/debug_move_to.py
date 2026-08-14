@@ -213,7 +213,9 @@ class DebugSession:
 
 
 async def main() -> None:
-    logging.basicConfig(level="INFO", format="%(levelname)s %(name)s: %(message)s")
+    # force: importing lerobot installs a root handler, which would make this a no-op —
+    # the root logger would stay at WARNING and every INFO line here would be dropped.
+    logging.basicConfig(level="INFO", format="%(levelname)s %(name)s: %(message)s", force=True)
     load_env(pathlib.Path(__file__).resolve().parent)
 
     url = required_env("LIVEKIT_URL")

@@ -56,6 +56,7 @@ async def main() -> None:
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
     )
     load_env(pathlib.Path(__file__).resolve().parent)
 
