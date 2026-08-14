@@ -18,7 +18,7 @@ Joins the room as an Operator peer and serves one RPC:
      before it plans, so each retry re-primes the arm from the pose every recorded
      episode starts at rather than from wherever the failed attempt left it.
      ``--attempt-budgets`` lists one budget per attempt and defaults to
-     ``10,15,20``: three tries, each given longer than the last, on the theory
+     ``15,20,25``: three tries, each given longer than the last, on the theory
      that a pick that missed is worth more time and not infinite time.
   5. **return** — a JSON summary: which attempt won, and the time to completion.
 
@@ -82,7 +82,7 @@ def _payload_task(data: RpcInvocationData, default: str) -> str:
 
 
 def _parse_budgets(raw: str) -> list[float]:
-    """``"10,15,20"`` -> ``[10.0, 15.0, 20.0]``, one time budget per attempt."""
+    """``"15,20,25"`` -> ``[15.0, 20.0, 25.0]``, one time budget per attempt."""
     try:
         budgets = [float(part) for part in raw.split(",") if part.strip()]
     except ValueError:
@@ -271,14 +271,14 @@ async def main() -> None:
     parser.add_argument("--camera", default=env_str("REWARD_CAMERA", "overhead_camera"),
                         help="Camera SARM watches (must match training).")
     parser.add_argument("--device", default=env_str("REWARD_DEVICE", "cuda" if torch.cuda.is_available() else "cpu"))
-    parser.add_argument("--threshold", type=float, default=float(env_str("REWARD_THRESHOLD", "0.97")),
+    parser.add_argument("--threshold", type=float, default=float(env_str("REWARD_THRESHOLD", "0.985")),
                         help="Progress reward at/above which the task counts as complete.")
     parser.add_argument("--hold-seconds", type=float, default=float(env_str("REWARD_HOLD_S", "1.0")),
                         help="Seconds progress must stay above threshold before calling it done.")
-    parser.add_argument("--attempt-budgets", default=env_str("REWARD_ATTEMPT_BUDGETS", "10,15,20"),
+    parser.add_argument("--attempt-budgets", default=env_str("REWARD_ATTEMPT_BUDGETS", "15,20,25"),
                         help="Comma-separated per-attempt time budgets in seconds. Each budget is "
                              "one pick; a spent budget restarts the policy, which refolds to the "
-                             "rest pose first. Default '10,15,20' = three tries.")
+                             "rest pose first. Default '15,20,25' = three tries.")
     parser.add_argument("--timeout", type=float, default=float(env_str("REWARD_TIMEOUT_S", "0")),
                         help="Overall safety cap across all attempts (0 = budgets govern).")
     parser.add_argument("--eval-interval", type=float, default=float(env_str("REWARD_EVAL_INTERVAL_S", "1.0")),

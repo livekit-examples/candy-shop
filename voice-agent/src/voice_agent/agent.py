@@ -85,6 +85,17 @@ class CandyShopAssistant(Agent):
                 # Keep a reference so the task isn't garbage-collected mid-run.
                 self._frame_task = asyncio.create_task(self._read_frames())
 
+        # Speak first: a silent agent is indistinguishable from a broken one, and
+        # the customer has no way to know what's on the shelf. Fires once per
+        # session — a finished GiveCandy resumes this activity rather than
+        # restarting it, so on_enter does not run again.
+        self.session.generate_reply(
+            instructions=(
+                "Greet the customer in one short sentence and tell them you have "
+                "KitKat, Nerds, Twix, and Snickers."
+            )
+        )
+
     @function_tool()
     async def give_candy(
         self, context: RunContext, candy_name: Literal["kitkat", "nerd", "twix", "snicker"]

@@ -55,7 +55,7 @@ from operators.reward.sarm import (ClipEncoder, DEFAULT_CHECKPOINT, DoneRule, Pr
 
 # Coarse enough to read at a glance, fine enough to see the curve's shape.
 SPARK = " ▁▂▃▄▅▆▇█"
-SWEEP_THRESHOLDS = (0.7, 0.8, 0.9, 0.95, 0.97, 0.99)
+SWEEP_THRESHOLDS = (0.8, 0.9, 0.95, 0.97, 0.985, 0.99)
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +171,7 @@ def main() -> None:
                         help="Fallback instruction if the dataset has no language column.")
     parser.add_argument("--device", default=env_str("REWARD_DEVICE", "cuda" if torch.cuda.is_available() else "cpu"))
     # These three mirror `uv run reward`, because calibrating them is the point.
-    parser.add_argument("--threshold", type=float, default=float(env_str("REWARD_THRESHOLD", "0.97")))
+    parser.add_argument("--threshold", type=float, default=float(env_str("REWARD_THRESHOLD", "0.985")))
     parser.add_argument("--hold-seconds", type=float, default=float(env_str("REWARD_HOLD_S", "1.0")))
     parser.add_argument("--eval-interval", type=float, default=float(env_str("REWARD_EVAL_INTERVAL_S", "1.0")),
                         help="Seconds between polls; also the frame stride, as online.")
