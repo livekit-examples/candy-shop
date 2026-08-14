@@ -3,6 +3,14 @@
 ROBOT_IDENTITY = "robot"
 VIDEO_TRACK_NAME = "overhead_camera"
 
+# How the Playground site marks a browser visitor apart from the robot and the
+# operators, who share the room and are all STANDARD participants too. A wire
+# contract with `web/components/playground/livekit/control.ts`; see visitor.py.
+VISITOR_KIND_ATTR = "vla_demo.kind"
+VISITOR_KIND = "viewer"
+# Epoch ms the visitor's control turn ends. Only the holder is granted a mic.
+CONTROL_UNTIL_ATTR = "vla_demo.control_until"
+
 MOVE_TO_IDENTITY = "move-to-operator"
 # The reward operator wraps the policy: its run_task drives the policy and watches
 # SARM for completion, so the agent talks to it rather than the policy directly.
@@ -45,6 +53,6 @@ DROP_TASK = "drop candy into the black circle"
 
 # Served through LiveKit Inference (no per-provider API keys required).
 STT_MODEL = "deepgram/nova-3"
-LLM_MODEL = "google/gemini-3.6-flash"
+LLM_MODEL = "google/gemma-4-31b-it"
 TTS_MODEL = "fishaudio/s2.1-pro"
 TTS_VOICE = "9a9cf47702da476aa4629e2506d4a857"
