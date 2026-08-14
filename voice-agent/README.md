@@ -64,6 +64,49 @@ Pre-download model weights (useful in Docker builds):
 uv run voice-agent download-files
 ```
 
+## Deploy as a hosted agent
+
+LiveKit Cloud builds the image from the `Dockerfile` here and runs `voice-agent
+start` on its own infrastructure. Run all of these from this directory — the
+build context is `voice-agent/`, not the repo root.
+
+First deploy. This registers the agent, assigns it an id, and writes
+`livekit.toml` (commit that file):
+
+```shell
+lk agent create --project <livekit-cloud-project> .
+```
+
+Afterwards:
+
+```shell
+lk agent deploy     # build and roll out a new version
+lk agent status     # replicas, CPU, memory
+lk agent logs       # tail runtime logs
+lk agent rollback   # back to the previous version
+```
+
+**No secrets to upload.** Every model is served through LiveKit Inference, and
+`LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` are injected by the
+platform. Do not point `--secrets-file` at the repo-root `.env`: it is full of
+rig-only config (serial ports, checkpoint paths) that the agent never reads.
+
+**The rig has to live in the same LiveKit project.** A hosted agent joins rooms
+in the Cloud project it was deployed to and reaches the robot and the operators
+by participant identity over RPC, so it cannot talk to a rig registered against
+a self-hosted server. Set `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and
+`LIVEKIT_API_SECRET` in the repo-root `.env` to that Cloud project before
+starting `robot` and the operators.
+
+**Dispatch is explicit.** The worker registers under
+`agent_name="candy-shop-assistant"`, so it is not auto-assigned to every room.
+Either name it in the room configuration of the token your frontend mints, or
+dispatch it by hand:
+
+```shell
+lk dispatch create --room candy-shop --agent-name candy-shop-assistant
+```
+
 ## Development
 
 ```shell

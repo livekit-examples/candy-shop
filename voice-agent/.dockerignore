@@ -1,0 +1,38 @@
+# Build context for `lk agent deploy`. The CLI also drops anything matched by
+# .gitignore and every .env* file, but keep this list standalone so a plain
+# `docker build` produces the same image.
+
+# Virtual environments. The macOS .venv here would clobber the linux one the
+# build stage just created — `COPY . .` lands after `uv sync`.
+.venv/
+venv/
+
+# Python bytecode and build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+
+# Secrets: LiveKit Cloud injects these at runtime instead.
+.env
+.env.*
+
+# VCS, docs, editor, OS
+.git
+.gitignore
+README.md
+.idea/
+.vscode/
+.DS_Store
+
+# Agent tooling
+.claude/
+CLAUDE.md
+AGENTS.md

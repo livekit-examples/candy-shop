@@ -126,6 +126,32 @@ class StateNormalizer:
         return (torch.as_tensor(state, dtype=torch.float32) - self._mean) / self._std
 
 
+def _disable_nested_tensor_fast_path(model: torch.nn.Module) -> None:
+    """Stop ``nn.TransformerEncoder`` taking its nested-tensor path.
+
+    Given a ``src_key_padding_mask`` the encoder tries to pack the batch into a nested
+    tensor, which calls ``aten::_nested_tensor_from_mask_left_aligned`` — unimplemented
+    on MPS, so serving on an Apple GPU dies mid-poll with NotImplementedError. The path
+    is purely a batching optimization for ragged padded batches; online we score one
+    window at a time, so there is nothing for it to pack and disabling it costs nothing.
+    Cheaper and less surprising than PYTORCH_ENABLE_MPS_FALLBACK, which would silently
+    bounce that op to CPU on every single poll.
+    """
+    # torch checks `use_nested_tensor` on the instance; `enable_nested_tensor` is only the
+    # constructor argument, and which one the instance carries has moved between versions.
+    # Clear whichever is present so this keeps working across upgrades.
+    disabled = 0
+    for module in model.modules():
+        if not isinstance(module, torch.nn.TransformerEncoder):
+            continue
+        for attr in ("use_nested_tensor", "enable_nested_tensor"):
+            if getattr(module, attr, False):
+                setattr(module, attr, False)
+                disabled += 1
+    if disabled:
+        logger.debug("[reward] disabled the nested-tensor fast path on %d encoder(s)", disabled)
+
+
 def load_reward_model(checkpoint: str, device: str) -> tuple[torch.nn.Module, SARMConfig]:
     """Load a trained SARM checkpoint for inference."""
     logger.info("[reward] loading SARM checkpoint %s ...", checkpoint)
@@ -136,6 +162,7 @@ def load_reward_model(checkpoint: str, device: str) -> tuple[torch.nn.Module, SA
     config.device = device
     model = make_reward_model(cfg=config)
     model.eval()
+    _disable_nested_tensor_fast_path(model)
     return model, config
 
 

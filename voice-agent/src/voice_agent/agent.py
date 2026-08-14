@@ -34,7 +34,10 @@ from voice_agent.task import GiveCandy
 
 logger = logging.getLogger("agent")
 
-# Single source of config: the repo-root .env (.env.local overrides it).
+# Single source of config: the repo-root .env (.env.local overrides it). The
+# hosted deployment ships neither file — LiveKit Cloud injects LIVEKIT_URL and
+# the keys as environment variables — and load_dotenv on a missing path is a
+# no-op, so the same two lines cover the container.
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 load_dotenv(_REPO_ROOT / ".env")
 load_dotenv(_REPO_ROOT / ".env.local", override=True)
