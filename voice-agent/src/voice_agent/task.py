@@ -57,10 +57,19 @@ class GiveCandy(AgentTask[bool]):
     async def stop(self, context: RunContext) -> str:
         """Stop the robot now and give up on the candy currently being fetched."""
         logger.info("stop requested mid-errand: %s", self.candy_name)
+        await self.abort()
+        return f"Stopped. The {self.candy_name} was not delivered."
+
+    async def abort(self) -> None:
+        """Abandon the errand and park the arm. Safe to call more than once.
+
+        `stop` above is the customer changing their mind; this is the same thing
+        driven from outside the conversation — the counter changing hands
+        mid-errand — so the next customer never inherits a moving arm.
+        """
         await self._abandon()
         if not self.done():
             self.complete(False)
-        return f"Stopped. The {self.candy_name} was not delivered."
 
     async def _run(self) -> None:
         """The errand itself. Completes the task; never raises to the event loop."""
