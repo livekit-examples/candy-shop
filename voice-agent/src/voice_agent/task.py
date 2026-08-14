@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import json
 import logging
 
 from livekit import rtc
@@ -20,6 +21,20 @@ from voice_agent.config import (
 )
 
 logger = logging.getLogger("agent")
+
+
+def _outcome(response: str) -> dict:
+    """The JSON body an operator answers with.
+
+    Both operators answer a *failed* run with a successful RPC — a spent pick
+    budget or a servo that never found its line is `{"done": false}` /
+    `{"reached": false}`, not an RpcError. So the body is the only place the
+    verdict lives, and a body we can't read is a failure, never a success.
+    """
+    try:
+        return json.loads(response)
+    except (TypeError, ValueError):
+        raise RuntimeError(f"unreadable operator response: {response!r}") from None
 
 
 class GiveCandy(AgentTask[bool]):
@@ -84,7 +99,11 @@ class GiveCandy(AgentTask[bool]):
             self.session.say("Bringing it over to you.")
             await self._move_to("drop zone")
 
-            self.session.say("And here you go!")
+            # Narrates the drop rather than announcing it done: the drop can still
+            # fail, and the delivery line belongs to whoever reads this task's
+            # result. Every say() above is a step that has started, not one that
+            # has landed.
+            self.session.say("Setting it down in the drop zone.")
             await self._run_task(DROP_TASK)
         except asyncio.CancelledError:
             # Teardown is the canceller's job — it can await cleanly.
@@ -140,19 +159,33 @@ class GiveCandy(AgentTask[bool]):
                 f"Unknown position {position!r}; expected one of {list(POSITIONS)}."
             )
 
-        await self.room.local_participant.perform_rpc(
-            destination_identity=MOVE_TO_IDENTITY,
-            method="move_to",
-            payload=str(POSITIONS[position]),
-            response_timeout=RPC_TIMEOUT_S,
+        outcome = _outcome(
+            await self.room.local_participant.perform_rpc(
+                destination_identity=MOVE_TO_IDENTITY,
+                method="move_to",
+                payload=str(POSITIONS[position]),
+                response_timeout=RPC_TIMEOUT_S,
+            )
         )
+        if not outcome.get("reached"):
+            raise RuntimeError(
+                f"never reached the {position}: {outcome.get('reason', 'unknown')}"
+            )
 
     async def _run_task(self, task: str) -> None:
         """Run one manipulation task: the reward operator drives the policy and
         watches SARM for completion, returning once the task is done."""
-        await self.room.local_participant.perform_rpc(
-            destination_identity=REWARD_IDENTITY,
-            method="run_task",
-            payload=task,
-            response_timeout=RUN_TASK_TIMEOUT_S,
+        outcome = _outcome(
+            await self.room.local_participant.perform_rpc(
+                destination_identity=REWARD_IDENTITY,
+                method="run_task",
+                payload=task,
+                response_timeout=RUN_TASK_TIMEOUT_S,
+            )
         )
+        if not outcome.get("done"):
+            raise RuntimeError(
+                f"{task!r} did not finish: {outcome.get('reason', 'unknown')} "
+                f"after {outcome.get('attempt_count', '?')} attempt(s), "
+                f"reward {outcome.get('progress')}"
+            )

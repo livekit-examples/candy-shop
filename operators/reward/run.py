@@ -279,14 +279,21 @@ async def main() -> None:
                         help="Comma-separated per-attempt time budgets in seconds. Each budget is "
                              "one pick; a spent budget restarts the policy, which refolds to the "
                              "rest pose first. Default '15,20,25' = three tries.")
-    parser.add_argument("--timeout", type=float, default=float(env_str("REWARD_TIMEOUT_S", "0")),
-                        help="Overall safety cap across all attempts (0 = budgets govern).")
+    parser.add_argument("--timeout", type=float, default=float(env_str("REWARD_TIMEOUT_S", "90")),
+                        help="Overall safety cap across all attempts (0 = uncapped). Must stay "
+                             "above the budgets plus a pause and an unwind each; must stay below "
+                             "the caller's RPC timeout minus 2x --policy-timeout, or the caller "
+                             "gives up while the arm is still moving.")
     parser.add_argument("--eval-interval", type=float, default=float(env_str("REWARD_EVAL_INTERVAL_S", "1.0")),
                         help="Seconds between SARM polls (also the frame-buffer stride).")
     parser.add_argument("--retry-pause", type=float, default=float(env_str("REWARD_RETRY_PAUSE_S", "1.0")),
                         help="Seconds to wait between a spent attempt and the next one.")
-    parser.add_argument("--policy-timeout", type=float, default=float(env_str("REWARD_POLICY_TIMEOUT_S", "60")),
-                        help="Timeout for the stop RPC / policy unwind.")
+    parser.add_argument("--policy-timeout", type=float, default=float(env_str("REWARD_POLICY_TIMEOUT_S", "10")),
+                        help="Hang guard on the stop RPC and the policy unwind, paid twice per "
+                             "attempt in the worst case. The stop RPC only sets a flag and "
+                             "run_policy checks it every tick, so a healthy unwind is under a "
+                             "second — this is slack, not a budget, and it lands on top of "
+                             "--timeout.")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -315,9 +322,13 @@ async def main() -> None:
         eval_interval_s=args.eval_interval, policy_timeout_s=args.policy_timeout,
         retry_pause_s=args.retry_pause,
     )
-    logger.info("[reward] threshold=%.2f hold=%.1fs attempt budgets=%s (%.0fs total)",
+    logger.info("[reward] threshold=%.2f hold=%.1fs attempt budgets=%s (%.0fs total) cap=%s",
                 args.threshold, args.hold_seconds,
-                ",".join(f"{b:g}" for b in budgets), sum(budgets))
+                ",".join(f"{b:g}" for b in budgets), sum(budgets),
+                f"{args.timeout:g}s" if args.timeout > 0 else "none")
+    if 0 < args.timeout < sum(budgets):
+        logger.warning("[reward] --timeout %.0fs is below the %.0fs of budgets: the later "
+                       "attempts can never run", args.timeout, sum(budgets))
 
     async def run_task(data: RpcInvocationData) -> str:
         """Run one task: drive the policy, watch SARM, release. Payload: task string or {"task": ...}."""

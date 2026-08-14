@@ -45,6 +45,16 @@ GREETING = (
     "KitKat, Nerds, Twix, and Snickers."
 )
 
+# Asked of the overhead frame alone, with none of the conversation for company —
+# so it has to name the drop zone rather than say "it" or "the candy".
+LOOK_PROMPT = (
+    "This is the overhead camera above a robot candy shop. The drop zone is the "
+    "black circle where the arm puts candy for the customer. In two sentences at "
+    "most: is there a candy inside the black circle, and if so what does it look "
+    "like? If the circle is empty, say so plainly and say where any candy you can "
+    "see is instead."
+)
+
 # Single source of config: the repo-root .env (.env.local overrides it). The
 # hosted deployment ships neither file — LiveKit Cloud injects LIVEKIT_URL and
 # the keys as environment variables — and load_dotenv on a missing path is a
@@ -164,15 +174,31 @@ class CandyShopAssistant(Agent):
     @function_tool()
     async def look(self, context: RunContext) -> str:
         """Look at the overhead camera to check the drop zone."""
-        if not self.latest_frame:
+        frame = self.latest_frame
+        if frame is None:
             return "No camera frame is available yet."
 
-        await self.session.generate_reply(
-            user_input=[
-                ImageContent(image=self.latest_frame),
-            ]
-        )
-        return "Finished analyzing the camera image."
+        # Read the frame with a plain LLM call and hand the answer back as this
+        # tool's result, rather than with generate_reply: a reply raised inside a
+        # function tool is forced to tool_choice="none", so it could describe the
+        # drop zone but never act on it — no retry, no reset — and it spoke its
+        # own turn on top of the one that called us.
+        ctx = ChatContext.empty()
+        ctx.add_message(role="user", content=[LOOK_PROMPT, ImageContent(image=frame)])
+        try:
+            answer = ""
+            async with self.session.llm.chat(chat_ctx=ctx) as stream:
+                async for chunk in stream:
+                    if chunk.delta and chunk.delta.content:
+                        answer += chunk.delta.content
+        except Exception:
+            logger.exception("failed to read the camera frame")
+            return "The camera image could not be read."
+
+        answer = answer.strip()
+        if not answer:
+            return "The camera image could not be read."
+        return f"The overhead camera shows: {answer}"
 
     @function_tool()
     async def reset(self, context: RunContext) -> None:

@@ -24,10 +24,14 @@ POLICY_IDENTITY = "policy-operator"
 # far worse than waiting. move_to alone can run its own TIMEOUT_S of 20s, which the old
 # 10s here would have cut off mid-travel.
 RPC_TIMEOUT_S = 60.0
-# run_task retries a failed pick on escalating budgets (15+20+25s by default = 60s of
-# picking) plus a retry pause between each and a policy unwind after each. This must stay
-# comfortably above that total: if it expires first the agent abandons the RPC while the
-# arm is still working. Raise in step with the reward operator's --attempt-budgets.
+# What run_task can cost, worst case, and why this is the number: the reward operator
+# caps a whole task at its --timeout (90s, itself above the 15+20+25s of pick budgets
+# plus a pause between each), and then pays one last policy unwind on the way out of
+# 2x --policy-timeout (2x10s). 90 + 20 = 110, so 120 leaves a little slack. The pick
+# budgets alone are NOT the total — that reading is what left this at 120 while the
+# unwind allowance was 60s a side, i.e. an uncapped 400s+ of arm time the agent would
+# abandon mid-motion. Move all three together (REWARD_ATTEMPT_BUDGETS,
+# REWARD_TIMEOUT_S, this) or the agent gives up while the arm is still working.
 RUN_TASK_TIMEOUT_S = 120.0
 
 # Named waypoints mapped to raw positions the move service understands.
