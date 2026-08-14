@@ -123,9 +123,17 @@ class RewardRunner:
     def request_stop(self) -> None:
         self._stop.set()
 
-    async def _start_policy(self, task: str) -> asyncio.Task:
-        """Kick off the policy's run_policy in the background (it runs forever)."""
-        response_timeout_ms = int((self._policy_timeout_s + self._timeout_s) * 1000)
+    async def _start_policy(self, task: str, budget_s: float) -> asyncio.Task:
+        """Kick off the policy's run_policy in the background (it runs forever).
+
+        The RPC has to outlive the attempt it covers: run_policy only returns when we
+        preempt it, so the response timeout is this attempt's budget plus the unwind
+        allowance. It used to be `policy_timeout + timeout`, which broke when --timeout
+        became an optional overall cap defaulting to 0 — the RPC then expired after
+        policy_timeout alone, inside every attempt longer than that, and the run died
+        with "rpc error 1502: Response timeout".
+        """
+        response_timeout_ms = int((budget_s + self._policy_timeout_s) * 1000)
         return asyncio.create_task(
             self._op.perform_rpc(
                 "run_policy", task, destination=POLICY_IDENTITY, response_timeout_ms=response_timeout_ms
@@ -161,7 +169,7 @@ class RewardRunner:
         await self._op.set_active_operator(POLICY_IDENTITY)
         logger.info("[reward] attempt %d/%d (%.1fs budget): active operator -> %s",
                     index, len(self._attempt_budgets), budget_s, POLICY_IDENTITY)
-        policy_task = await self._start_policy(task)
+        policy_task = await self._start_policy(task, budget_s)
 
         t0 = time.monotonic()
         ticks = 0
@@ -265,7 +273,7 @@ async def main() -> None:
                         help="Overall safety cap across all attempts (0 = budgets govern).")
     parser.add_argument("--eval-interval", type=float, default=float(env_str("REWARD_EVAL_INTERVAL_S", "1.0")),
                         help="Seconds between SARM polls (also the frame-buffer stride).")
-    parser.add_argument("--policy-timeout", type=float, default=float(env_str("REWARD_POLICY_TIMEOUT_S", "10")),
+    parser.add_argument("--policy-timeout", type=float, default=float(env_str("REWARD_POLICY_TIMEOUT_S", "60")),
                         help="Timeout for the stop RPC / policy unwind.")
     args = parser.parse_args()
 
