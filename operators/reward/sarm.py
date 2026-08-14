@@ -71,7 +71,15 @@ def latest_checkpoint(root: str = CHECKPOINT_ROOT) -> str:
     return str(steps[-1] / "pretrained_model")
 
 
-DEFAULT_CHECKPOINT = latest_checkpoint()
+# Pinned, NOT latest_checkpoint(): this run peaked early and then degraded. Measured
+# with reward-debug over 40 episodes spanning all five tasks, at threshold 0.7:
+#   step  4000 -> 40/40 fired, median peak 0.96, early-quarter 0.07   <- best
+#   step  8000 ->  0/10 fired, median peak 0.52, early-quarter 0.38
+#   step 12000 ->  0/10 fired, median peak 0.56, early-quarter 0.41
+# The regression starts exactly at the job-6 resume boundary, so it is either
+# overfitting past ~3 epochs or the resume perturbing optimizer/scheduler state —
+# unresolved. Re-measure before repointing this at a later checkpoint.
+DEFAULT_CHECKPOINT = "outputs/sarm-candy-v2/checkpoints/004000/pretrained_model"
 
 # The CLIP encoder SARM was trained against (see processor_sarm.py). SARM eats
 # CLIP embeddings, so inference must use the exact same encoder.

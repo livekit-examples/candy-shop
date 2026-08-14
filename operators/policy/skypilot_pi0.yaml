@@ -39,7 +39,11 @@ envs:
   # only after checking mem_gb in the logs.
   BASE_CHECKPOINT: lerobot/pi0_base
   BATCH_SIZE: 32
-  STEPS: 30000
+  # ~6.9 epochs over 93k frames at batch 32. Measured 3.5 s/step with the VLM frozen
+  # (13.35 s/step training all 4B, i.e. 111h for 30k — not viable), so this is ~18h.
+  # The SARM run peaked at ~3 epochs and then degraded, so prefer more checkpoints to
+  # choose from over one long run: SAVE_FREQ gives four, each ~23 GB with its state.
+  STEPS: 20000
   NUM_WORKERS: 8
   # Each checkpoint is the full ~2.3B model plus processors, ~9 GB.
   SAVE_FREQ: 5000
@@ -48,6 +52,11 @@ envs:
   # into its slots; it has a third (right_wrist) that we simply do not supply, and
   # modeling_pi0 pads any missing image key itself.
   RENAME_MAP: '{"observation.images.overhead_camera": "observation.images.base_0_rgb", "observation.images.arm_camera": "observation.images.left_wrist_0_rgb"}'
+  # Extra lerobot-train flags. --policy.train_expert_only true freezes PaliGemma and
+  # trains only the ~300M action expert, which is what SmolVLA does by default and is
+  # the right shape for ~100 demos/task; full fine-tune of all 4B params measured at
+  # 13.35 s/step, i.e. 111h for 30k steps.
+  EXTRA_ARGS: ""
   HF_TOKEN: ""                  # only needed while the dataset/checkpoint repos are private
 
 file_mounts:
@@ -71,10 +80,11 @@ run: |
 
   export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-  uv run --only-group train-pi0 lerobot-train \
+  uv run --only-group train-pi0 python -m operators.policy.train_fast \
     --policy.path "$BASE_CHECKPOINT" \
     --policy.dtype bfloat16 \
     --policy.push_to_hub false \
+    --policy.train_expert_only true \
     --policy.gradient_checkpointing true \
     --dataset.repo_id "$DATASET_REPO_ID" \
     --dataset.video_backend "$VIDEO_BACKEND" \
@@ -85,4 +95,5 @@ run: |
     --steps "$STEPS" \
     --save_freq "$SAVE_FREQ" \
     --num_workers "$NUM_WORKERS" \
-    --wandb.enable false
+    --wandb.enable false \
+    ${EXTRA_ARGS:-}
