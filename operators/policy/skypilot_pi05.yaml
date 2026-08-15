@@ -71,9 +71,12 @@ envs:
   EVAL_SPLIT: "0.05"
   EVAL_STEPS: 250
 
-  # 4 per rank x 8 ranks = 32 dataloader workers. The reward run already hit shm limits
-  # at 8 workers on one process; do not raise this without checking /dev/shm.
-  NUM_WORKERS: 4
+  # Per rank, so x8. Datasets that have been through delete_episodes are re-encoded to
+  # AV1, which decodes ~2.4x slower: arm A ran 1.68 s/step on the source dataset and
+  # 4.05 s/step on the curated one, with the GPUs at 0% and 93% of 128 cores idle --
+  # dataloader-starved, not compute-bound. Raise this for AV1 datasets. The reward run
+  # hit shm limits at 8 workers in one process, so watch /dev/shm when going higher.
+  NUM_WORKERS: 12
 
   # Which parameters train. The folding blog freezes *only* the SigLIP vision encoder
   # and trains the Gemma backbone with the action expert — lerobot defaults both flags
