@@ -11,8 +11,9 @@
 # Arms, in order:
 #   B  curated 270   from arm A's best checkpoint   -- does SARM curation help?
 #   C  random 270    from arm A's best checkpoint   -- ... or would any 270 do?
-#   E  stage 1, backbone trainable, 3000 steps      -- reopens the freeze question,
-#      whose earlier answer came from a run killed inside its LR warmup.
+#
+# Arm E (backbone trainable) runs on its own cluster instead; it would otherwise write
+# to the same /outputs/arm-e-backbone and interleave checkpoints with that run.
 set -uo pipefail
 
 cd "$HOME/sky_workdir"
@@ -98,13 +99,5 @@ run_arm arm-c-random "$A_BEST" \
   /outputs/datasets/candy-shop-rand60-rel binhpham/candy-shop-rand60-rel \
   /outputs/rabc/candy-shop-rand60-rel-sarmv2-12000-s4.parquet \
   "--policy.train_expert_only true" 800
-
-# Arm E starts from the pretrained base, not from A: it is a stage-1 alternative, not a
-# fine-tune of one. freeze_vision_encoder trains the Gemma backbone and freezes only
-# SigLIP, which is what the folding blog actually did.
-run_arm arm-e-backbone /outputs/base_models/pi05_base \
-  /outputs/datasets/candy-train-rel binhpham/candy-shop-train-rel \
-  /outputs/rabc/candy-train-rel-sarmv2-12000-s4.parquet \
-  "--policy.freeze_vision_encoder true" 3000
 
 log "all arms complete"
