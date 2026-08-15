@@ -9,14 +9,15 @@
 # absolute-action fine-tuning fights the pretraining. The two go together: take
 # neither or both. USE_RELATIVE_ACTIONS=false is not a supported configuration here.
 #
-# WEIGHTS AND DATA COME FROM THE BUCKET, NOT THE HUB. Nebius has no route to the AWS
-# ranges behind us.aws.cdn.hf.co (15.236.0.0/15) or cas-server.xethub.hf.co
-# (54.211.x) — TCP SYN to :443 times out — so any instance that draws a public IP in
-# 195.242.28.0/22 cannot fetch from the Hub at all, while 89.169.120.0/21 works fine.
-# Same subnet, same security group, same route table; only the prefix differs. Rather
-# than gamble on the allocation, both artifacts are staged in the bucket:
-#   s3://candy-shop/base_models/pi05_base   (from a good-egress host)
-#   s3://candy-shop/datasets/candy-shop     (from the pi0 box, which had it cached)
+# PREFER THE BUCKET OVER THE HUB. Nebius has no route to the AWS ranges behind
+# us.aws.cdn.hf.co (15.236.0.0/15) or cas-server.xethub.hf.co (54.211.x) — TCP SYN to
+# :443 times out — so an instance that draws a public IP in 195.242.28.0/22 cannot
+# fetch from the Hub at all, while one in 89.169.x works fine. Same subnet, same
+# security group, same route table (all verified permissive); only the prefix differs,
+# and which one you get is luck of the allocation. So inputs are read from the bucket
+# where they have been staged:
+#   s3://candy-shop/datasets/candy-shop   (staged, from the pi0 box which had it cached)
+#   s3://candy-shop/base_models/pi05_base (weights; falls back to the Hub if absent)
 # See shared/lerobot_patches.require_pretrained_weights for why a failed fetch must
 # never be allowed to reach lerobot: it swallows the error and trains from noise.
 name: pi05-candy-finetune
@@ -31,9 +32,12 @@ envs:
   CHECKPOINT_BUCKET: candy-shop
   RUN_NAME: pi05-candy
   DATASET_REPO_ID: binhpham/candy-shop
+  # Relative-stats copy; see the recompute_stats step for why it is a separate dataset.
+  DATASET_REL_ID: binhpham/candy-shop-rel
 
   # Bucket-staged inputs, copied to instance disk in `run` before anything reads them.
   BASE_SRC: /outputs/base_models/pi05_base
+  BASE_HUB_ID: lerobot/pi05_base   # fallback when the bucket copy is absent
   DATASET_SRC: /outputs/datasets/candy-shop
   SARM_SRC: /outputs/sarm-candy-v2/checkpoints/012000/pretrained_model
 
@@ -90,10 +94,11 @@ setup: |
   sudo apt-get install -y python3-dev libevdev-dev ffmpeg \
     libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev
   pip install uv --quiet
-  # matplotlib is imported unconditionally at the top of lerobot's
-  # compute_rabc_weights, so the RABC prep step below dies on import without it.
+  # Two groups: training runs under train-pi0, but SARM scoring needs the sarm extra
+  # (its processor imports faker at construction) plus matplotlib, which is a top-level
+  # import in compute_rabc_weights. Neither is in train-pi0.
   uv sync --only-group train-pi0
-  uv pip install matplotlib
+  uv sync --only-group train-reward
 
 run: |
   set -euo pipefail
@@ -109,20 +114,33 @@ run: |
   # but not for the random reads of a training dataloader, and recompute_stats rewrites
   # stats.json in place, which we do not want to do to the shared copy.
   mkdir -p ~/models ~/data
-  cp -r "$BASE_SRC" ~/models/pi05_base
   cp -r "$DATASET_SRC" ~/data/candy-shop
   cp -r "$SARM_SRC" ~/models/sarm
 
+  # Weights: prefer the bucket copy, fall back to the Hub. Whether the Hub works depends
+  # on which public IP this instance drew (see the header), so the fallback is a coin
+  # flip — but require_pretrained_weights turns a lost flip into an immediate, loud
+  # failure at startup rather than a weekend of training from random initialisation.
+  if [ -f "$BASE_SRC/model.safetensors" ]; then
+    echo "base weights: bucket copy at $BASE_SRC"
+    cp -r "$BASE_SRC" ~/models/pi05_base
+    POLICY_PATH=~/models/pi05_base
+  else
+    echo "base weights: bucket copy absent, falling back to Hub ($BASE_HUB_ID)"
+    POLICY_PATH="$BASE_HUB_ID"
+  fi
+
   # Relative-action stats OVERWRITE stats[ACTION] under the same key (dataset_tools.py
   # :1679) — there is no separate namespace, so nothing downstream can tell absolute
-  # stats from relative ones, and training with the wrong pair silently normalizes with
-  # the wrong mean/std. That is also why this runs on the local copy only: the bucket
-  # copy stays absolute so the pi0 serving path keeps working.
+  # stats from relative ones, and training against the wrong pair silently normalizes
+  # with the wrong mean/std. Hence a separate output root: ~/data/candy-shop keeps the
+  # absolute stats the pi0 serving path needs, and only -rel is trained on.
+  # (new_root == root is rejected as in-place unless --operation.overwrite true.)
   uv run --only-group train-pi0 lerobot-edit-dataset \
     --repo_id "$DATASET_REPO_ID" \
     --root ~/data/candy-shop \
-    --new_repo_id "$DATASET_REPO_ID" \
-    --new_root ~/data/candy-shop \
+    --new_repo_id "$DATASET_REL_ID" \
+    --new_root ~/data/candy-shop-rel \
     --operation.type recompute_stats \
     --operation.relative_action true \
     --operation.chunk_size "$CHUNK_SIZE"
@@ -135,11 +153,11 @@ run: |
   # repo with no try/except. Unattended that either aborts the run (no token) or pushes
   # to the Hub repo unasked. The library function does the same computation and stops at
   # writing the file. dataset_repo_id takes a local path.
-  uv run --only-group train-pi0 python -c "
+  uv run --only-group train-reward python -c "
   from lerobot.rewards.sarm.compute_rabc_weights import compute_sarm_progress
   import os
   compute_sarm_progress(
-      dataset_repo_id=os.path.expanduser('~/data/candy-shop'),
+      dataset_repo_id=os.path.expanduser('~/data/candy-shop-rel'),
       reward_model_path=os.path.expanduser('~/models/sarm'),
       output_path=os.path.expanduser('~/data/rabc_progress.parquet'),
       head_mode='sparse',
@@ -151,15 +169,15 @@ run: |
   uv run --only-group train-pi0 accelerate launch \
     --multi_gpu --num_processes "$NUM_PROCESSES" \
     -m operators.policy.train_fast \
-    --policy.path ~/models/pi05_base \
+    --policy.path "$POLICY_PATH" \
     --policy.dtype bfloat16 \
     --policy.push_to_hub false \
     --policy.use_relative_actions true \
     --policy.gradient_checkpointing true \
     --policy.chunk_size "$CHUNK_SIZE" \
     ${FREEZE_ARGS} \
-    --dataset.repo_id "$DATASET_REPO_ID" \
-    --dataset.root ~/data/candy-shop \
+    --dataset.repo_id "$DATASET_REL_ID" \
+    --dataset.root ~/data/candy-shop-rel \
     --dataset.video_backend "$VIDEO_BACKEND" \
     --sample_weighting.type rabc \
     --sample_weighting.progress_path ~/data/rabc_progress.parquet \

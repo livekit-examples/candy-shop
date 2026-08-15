@@ -52,10 +52,13 @@ train-pi0 = [
 ]
 # operators/reward/skypilot.yaml: SARM's encoding processor imports faker (and the
 # rest of the sarm extra) at construction, so reward training needs it on top of
-# the shared training stack.
+# the shared training stack. matplotlib is not part of that extra but sits at the top
+# of lerobot's compute_rabc_weights as an unconditional import, so scoring a dataset
+# for RABC (operators/policy/skypilot_pi05.yaml) dies without it.
 train-reward = [
     { include-group = "train" },
     "lerobot[sarm]==0.6.1",
+    "matplotlib",
 ]
 
 [[tool.uv.index]]
