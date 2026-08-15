@@ -100,11 +100,22 @@ def main() -> None:
                         help="Trim this quantile from each end of the length distribution.")
     parser.add_argument("--out-json", default=None,
                         help="Write the full per-episode table here for inspection.")
+    parser.add_argument("--random-seed", type=int, default=None,
+                        help="Ignore the scores and keep a random subset of the same size. "
+                             "The control arm: every recorded episode already completes the "
+                             "task, so ranking them by SARM progress may be selecting on "
+                             "nothing. If a random subset fine-tunes as well as the ranked "
+                             "one, the ranking is not doing any work.")
     args = parser.parse_args()
 
     df = pd.read_parquet(args.progress_parquet)
     metrics = episode_metrics(df, args.column)
-    keep = select(metrics, args.keep_fraction, args.length_quantile)
+    if args.random_seed is None:
+        keep = select(metrics, args.keep_fraction, args.length_quantile)
+    else:
+        n_keep = max(1, int(round(len(metrics) * args.keep_fraction)))
+        keep = metrics.sample(n=n_keep, random_state=args.random_seed)
+        print(f"RANDOM control: kept {n_keep} of {len(metrics)} (seed {args.random_seed})")
 
     keep_set = set(keep["episode_index"])
     drop = sorted(set(metrics["episode_index"]) - keep_set)
