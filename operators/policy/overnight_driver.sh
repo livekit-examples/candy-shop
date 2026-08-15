@@ -61,7 +61,10 @@ run_arm() {
   rm -rf "$HOME/data/run-$name" "$HOME/models/base-$name"
   cp -r "$data" "$HOME/data/run-$name"
   cp -r "$base" "$HOME/models/base-$name"
-  uv run --only-group train-pi0 accelerate launch \
+  # Absolute path to the venv's accelerate: `uv` is not on PATH for a non-login ssh
+  # session, which is how this script runs. The first attempt died exit 127 on both
+  # arms for exactly that reason -- SkyPilot's own run block has a fuller environment.
+  "$HOME/sky_workdir/.venv/bin/accelerate" launch \
     --multi_gpu --num_processes 8 \
     -m operators.policy.train_fast \
     --policy.path "$HOME/models/base-$name" \
