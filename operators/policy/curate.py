@@ -24,6 +24,14 @@ turns that into three per-episode numbers and selects on them:
 Emits the ``--operation.episode_indices`` list for ``lerobot-edit-dataset
 --operation.type delete_episodes``; it never mutates a dataset itself, so the
 selection can be eyeballed before anything is written.
+
+RECOMPUTE THE RABC PARQUET AFTER CURATING. ``RABCWeighter`` looks its progress values
+up by ``batch["index"]``, the dataset-global frame index, and deleting episodes
+renumbers those. Reusing the parquet from the uncurated dataset therefore lines each
+frame up against some other frame's progress -- and it does so quietly: rabc.py only
+warns when ``index`` is missing outright, never when it is present but shifted. The
+same goes for the relative-action stats, which should be recomputed over the episodes
+that actually remain.
 """
 from __future__ import annotations
 
