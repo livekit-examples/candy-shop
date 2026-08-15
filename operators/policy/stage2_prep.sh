@@ -77,7 +77,7 @@ import os
 compute_sarm_progress(
     dataset_repo_id=os.path.expanduser('${HQ_ROOT}-rel'),
     reward_model_path=os.path.expanduser('$SARM'),
-    output_path=os.path.expanduser('$HOME/data/rabc_progress_hq.parquet'),
+    output_path=os.path.expanduser('$HOME/data/rabc_progress_$TAG.parquet'),
     head_mode='sparse', device='cuda', num_visualizations=0, stride=$STRIDE,
 )
 "
