@@ -171,7 +171,7 @@ def main() -> None:
                         help="Fallback instruction if the dataset has no language column.")
     parser.add_argument("--device", default=env_str("REWARD_DEVICE", "cuda" if torch.cuda.is_available() else "cpu"))
     # These three mirror `uv run reward`, because calibrating them is the point.
-    parser.add_argument("--threshold", type=float, default=float(env_str("REWARD_THRESHOLD", "0.98")))
+    parser.add_argument("--threshold", type=float, default=float(env_str("REWARD_THRESHOLD", "0.99")))
     parser.add_argument("--hold-seconds", type=float, default=float(env_str("REWARD_HOLD_S", "1.0")))
     parser.add_argument("--eval-interval", type=float, default=float(env_str("REWARD_EVAL_INTERVAL_S", "1.0")),
                         help="Seconds between polls; also the frame stride, as online.")
