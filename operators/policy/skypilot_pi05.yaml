@@ -40,7 +40,12 @@ envs:
   BASE_HUB_ID: lerobot/pi05_base   # fallback when the bucket copy is absent
   DATASET_SRC: /outputs/datasets/candy-shop
   SARM_SRC: /outputs/sarm-candy-v2/checkpoints/012000/pretrained_model
-  RABC_SRC: /outputs/rabc/candy-shop-rel-sarmv2-12000.parquet
+  RABC_SRC: /outputs/rabc/candy-shop-rel-sarmv2-12000-s4.parquet
+  # Score every 4th frame and interpolate between. Measured 1.5 episodes/min at stride 1,
+  # i.e. ~5.6 h for 500 episodes on a single GPU while the other seven idle. RABC consumes
+  # progress as a *delta across one action chunk* (50 frames, 1.67 s), so 4-frame (0.13 s)
+  # granularity is an order of magnitude finer than the quantity being measured.
+  RABC_STRIDE: 4
 
   # Per *process*, not global: lerobot multiplies by accelerate's num_processes and
   # logs "Effective batch size: 32 x 8 = 256", which is the folding blog's figure.
@@ -181,6 +186,7 @@ run: |
       head_mode='sparse',
       device='cuda',
       num_visualizations=0,
+      stride=int(os.environ['RABC_STRIDE']),
   )
   "
     mkdir -p "$(dirname "$RABC_SRC")"
