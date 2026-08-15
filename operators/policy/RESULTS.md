@@ -115,6 +115,11 @@ Verified three ways, without hardware:
    `relative_exclude_joints` skips. Up to 7 units of pose error per tick, compounding as
    the arm moves.
 
+4. **No regression on pi0.** Against `pi0-candy/010000` (absolute actions), the chunk
+   path and the old `select_action` path return bit-identical actions, max abs
+   difference 0.0 -- as expected, since unnormalize is elementwise and the absolute
+   step is disabled there.
+
 Still worth a stationary-arm smoke test before a live rollout: the loop was exercised
 with synthetic (black) images, so timing and camera wiring are unproven.
 
