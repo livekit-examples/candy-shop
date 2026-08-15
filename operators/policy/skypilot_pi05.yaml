@@ -40,6 +40,7 @@ envs:
   BASE_HUB_ID: lerobot/pi05_base   # fallback when the bucket copy is absent
   DATASET_SRC: /outputs/datasets/candy-shop
   SARM_SRC: /outputs/sarm-candy-v2/checkpoints/012000/pretrained_model
+  RABC_SRC: /outputs/rabc/candy-shop-rel-sarmv2-12000.parquet
 
   # Per *process*, not global: lerobot multiplies by accelerate's num_processes and
   # logs "Effective batch size: 32 x 8 = 256", which is the folding blog's figure.
@@ -153,7 +154,16 @@ run: |
   # repo with no try/except. Unattended that either aborts the run (no token) or pushes
   # to the Hub repo unasked. The library function does the same computation and stops at
   # writing the file. dataset_repo_id takes a local path.
-  uv run --only-group train-reward python -c "
+  # Cached in the bucket because it is a property of (dataset, SARM checkpoint) only —
+  # nothing about the policy or the GPU count enters into it. Scoring runs single-process
+  # at ~7.8 frames/s, i.e. ~3.3 h for our 92,941 frames, which is worth paying once on
+  # one GPU rather than on every fan-out of eight.
+  if [ -f "$RABC_SRC" ]; then
+    echo "rabc progress: cached at $RABC_SRC"
+    cp "$RABC_SRC" ~/data/rabc_progress.parquet
+  else
+    echo "rabc progress: not cached, scoring (~3.3 h)"
+    uv run --only-group train-reward python -c "
   from lerobot.rewards.sarm.compute_rabc_weights import compute_sarm_progress
   import os
   compute_sarm_progress(
@@ -165,6 +175,9 @@ run: |
       num_visualizations=0,
   )
   "
+    mkdir -p "$(dirname "$RABC_SRC")"
+    cp ~/data/rabc_progress.parquet "$RABC_SRC"
+  fi
 
   uv run --only-group train-pi0 accelerate launch \
     --multi_gpu --num_processes "$NUM_PROCESSES" \
