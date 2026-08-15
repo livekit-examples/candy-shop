@@ -126,7 +126,11 @@ run: |
   # Stage onto instance disk. The bucket mount is fine for sequential checkpoint writes
   # but not for the random reads of a training dataloader, and recompute_stats rewrites
   # stats.json in place, which we do not want to do to the shared copy.
+  # rm -rf first: `cp -r src dst` when dst already exists nests the copy inside it
+  # (~/data/candy-shop/candy-shop), which every relaunch onto a warm cluster would hit —
+  # and relaunching is the normal way to pick up a config change here.
   mkdir -p ~/models ~/data
+  rm -rf ~/data/candy-shop ~/data/candy-shop-rel ~/models/sarm
   cp -r "$DATASET_SRC" ~/data/candy-shop
   cp -r "$SARM_SRC" ~/models/sarm
 
