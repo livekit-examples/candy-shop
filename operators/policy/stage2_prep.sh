@@ -31,6 +31,9 @@ SARM="${SARM:-$HOME/models/sarm}"
 RABC_FULL="${RABC_FULL:-/outputs/rabc/candy-shop-rel-sarmv2-12000-s4.parquet}"
 CHUNK_SIZE="${CHUNK_SIZE:-50}"
 STRIDE="${STRIDE:-4}"
+# Set to run the control arm: keep a random subset of the same size instead of the
+# SARM-ranked one. See operators/policy/curate.py --random-seed.
+RANDOM_SEED="${RANDOM_SEED:-}"
 PY="${PY:-$HOME/sky_workdir/.venv/bin/python}"
 EDIT="${EDIT:-$HOME/sky_workdir/.venv/bin/lerobot-edit-dataset}"
 
@@ -43,6 +46,7 @@ echo "stage2: ranking episodes"
 DROP=$("$PY" operators/policy/curate.py \
   --progress-parquet "$RABC_FULL" \
   --keep-fraction "$KEEP_FRACTION" \
+  ${RANDOM_SEED:+--random-seed $RANDOM_SEED} \
   --out-json "$HOME/data/episode_scores_$TAG.json" \
   | tee /dev/stderr | grep -oE '^--operation.episode_indices .*' | cut -d' ' -f2-)
 
