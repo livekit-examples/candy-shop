@@ -20,13 +20,19 @@ ARMS="arm-a-stage1 arm-b-curated arm-c-random arm-e-backbone"
 
 log() { echo "[score $(date -u +%H:%M:%S)] $*"; }
 
-# A run is finished when its newest checkpoint has been still for a while. Scoring a run
-# that is still training would pick a checkpoint that is not its best.
+# A run is finished when its newest checkpoint has been still for longer than the gap
+# between checkpoints. The first version used 900s, but at ~4 s/step with save_freq=250
+# the gap between saves is ~17 min, so it fired mid-training and scored arm A at step
+# 2250 while it was still running. 2700s clears that with margin; the expected count
+# check is the real guard, with the timer only as a backstop for runs stopped early.
+declare -A EXPECTED=( [arm-a-stage1]=12 [arm-b-curated]=3 [arm-c-random]=3 [arm-e-backbone]=12 )
 settled() {
-  local run="$1" newest
+  local run="$1" newest have
   newest=$(ls -dt /outputs/"$run"/checkpoints/*/ 2>/dev/null | head -1)
   [ -n "$newest" ] || return 1
-  [ $(( $(date +%s) - $(stat -c %Y "$newest") )) -gt 900 ]
+  have=$(ls -d /outputs/"$run"/checkpoints/*/ 2>/dev/null | wc -l)
+  [ "$have" -ge "${EXPECTED[$run]:-999}" ] && return 0
+  [ $(( $(date +%s) - $(stat -c %Y "$newest") )) -gt 2700 ]
 }
 
 # Best by held-out flow-matching loss, read from whichever training log carries this
