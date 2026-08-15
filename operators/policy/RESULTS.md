@@ -73,11 +73,11 @@ curation and exclude it everywhere.
    the metric that matters.
 3. `/outputs/pi05-stage2-hq40/checkpoints/000600` — only if 1 and 2 disappoint.
 
-## Serving: a correctness bug to fix before any rollout
+## Serving: a correctness bug, found and fixed
 
-`run.py` is wired for pi0 with absolute-action stats, so it needs a pi0.5 path
-(`PI05Policy`, `num_inference_steps`, the checkpoint's own norm stats). More important,
-**its inference loop is wrong for relative actions**, and the failure is silent.
+`run.py` now loads whichever architecture the checkpoint's `config.json` names, so pi0
+and pi0.5 both serve. The substantive fix was that **its inference loop was wrong for
+relative actions**, silently.
 
 `RelativeActionsProcessorStep` caches the state it last saw; the paired
 `AbsoluteActionsProcessorStep` in the output pipeline adds
@@ -94,17 +94,29 @@ Every action after the first in a chunk is referenced to the wrong pose. Nothing
 raises; the arm just tracks a distorted trajectory, which would be read as the policy
 being bad rather than the plumbing being wrong.
 
-The fix is to postprocess a whole chunk at prediction time, while the cache still holds
-the right state, and serve absolute actions from a local queue:
+The fix, now in `_infer`, postprocesses a whole chunk at prediction time while the cache
+still holds the right state, and serves absolute actions from a local queue;
+`_replan_pending` reads that queue instead of `policy._action_queue`.
+`to_absolute_actions` already accepts `(B, T, action_dim)` and broadcasts state across
+time, so this is the supported shape, not a workaround.
 
-    observation = self._pre(observation)
-    chunk = self._policy.predict_action_chunk(observation)   # [1, chunk, action_dim]
-    chunk = self._post(chunk)                                # absolute, all w.r.t. this state
-    self._chunk = deque(chunk.squeeze(0).cpu())              # pop one per tick, no reprocessing
+Verified three ways, without hardware:
 
-`_replan_pending` should then read the local queue rather than `policy._action_queue`.
-Untested here -- it is arm-control code and there was no hardware in the loop -- so
-verify against a stationary arm before a real rollout.
+1. **Processor invariant.** A chunk of zero relative actions postprocesses to exactly
+   the reference pose, identically on every row -- i.e. one reference state broadcast
+   across all 50 steps.
+2. **Real checkpoint end to end.** `pi05-stage2-hq60/000100` loads, predicts a `(50, 7)`
+   chunk, all finite, first action adjacent to the reference pose as a relative model
+   should produce.
+3. **Bug quantified.** Postprocessing the same chunk after the preprocessor has seen a
+   moved state -- exactly what the old loop did every tick -- shifts targets by
+   `[3.0, 5.0, 6.0, 4.0, 7.0, 0.0]` against a state drift of `[3, 5, 6, 4, 7, 6]`. The
+   error equals the drift on every relative dimension and is zero on the gripper, which
+   `relative_exclude_joints` skips. Up to 7 units of pose error per tick, compounding as
+   the arm moves.
+
+Still worth a stationary-arm smoke test before a live rollout: the loop was exercised
+with synthetic (black) images, so timing and camera wiring are unproven.
 
 ## Operational notes
 

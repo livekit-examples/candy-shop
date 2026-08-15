@@ -1,10 +1,14 @@
-"""Picker operator: serve pi0 (six-DOF arm) over the ``run_policy`` RPC.
+"""Picker operator: serve pi0 or pi0.5 (six-DOF arm) over the ``run_policy`` RPC.
 
-The checkpoint is required — there is no servable stock pi0, so fine-tune one
-first (see ``skypilot_pi0.yaml``)::
+The checkpoint is required — neither has a servable stock checkpoint, so fine-tune
+one first (``skypilot_pi0.yaml`` / ``skypilot_pi05.yaml``)::
 
     uv run policy --checkpoint outputs/pi0-candy/checkpoints/005000/pretrained_model
     uv run policy --checkpoint <user>/pi0-candy       # or a Hub repo id
+
+Which architecture to load is read from the checkpoint's own ``config.json``; pi0.5
+additionally arrives with ``use_relative_actions``, which is why chunking is driven
+here rather than by ``select_action`` (see :meth:`PolicyRunner._infer`).
 
 Checkpoints live in the bucket rather than beside the code, and lerobot's
 ``last`` symlink is never written (object storage has no symlinks — see
@@ -19,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import deque
 import json
 import logging
 import os
@@ -31,8 +36,9 @@ import torch
 
 from livekit.portal import Observation, Operator, OperatorConfig, RpcError, RpcInvocationData, frame_bytes_to_numpy_rgb
 
-from lerobot.policies.pi0.modeling_pi0 import PI0Policy
+from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies import make_pre_post_processors
+from lerobot.policies.factory import get_policy_class
 from lerobot.policies.utils import prepare_observation_for_inference
 from lerobot.utils.constants import OBS_STATE
 
@@ -101,6 +107,8 @@ class PolicyRunner:
             keys=ARM_POS_KEYS, tolerance=settle_tolerance, timeout_s=settle_timeout_s
         )
         self._state: dict[str, float] = {}
+        # Absolute actions awaiting execution; see _infer for why chunking lives here.
+        self._chunk: deque = deque()
         self._obs_ts_us = 0
         self._frames: dict[str, np.ndarray] = {}
         self._start_ramp_s = start_ramp_s
@@ -142,27 +150,53 @@ class PolicyRunner:
         self._stop.set()
 
     def _replan_pending(self) -> bool:
-        """True when the next ``select_action`` runs the model instead of popping.
+        """True when the next tick runs the model instead of popping.
 
-        pi0 buffers an ``n_action_steps`` chunk (50, ~1.7 s at 30 fps) and only
-        replans once it drains (empty also before the first plan).
-
-        Read ``_action_queue``, not the ``_queues[ACTION]`` SmolVLA used: pi0's
-        ``reset`` builds both but ``select_action`` only ever fills the former, so
-        ``_queues`` stays empty forever and would gate every tick as a replan.
+        Reads our own queue rather than the policy's: we drive chunking here (see
+        :meth:`_infer`), so ``policy._action_queue`` is never filled at all.
         """
-        return not getattr(self._policy, "_action_queue", None)
+        return not self._chunk
 
     @torch.inference_mode()
     def _infer(self, state_vec: np.ndarray, images: dict[str, np.ndarray], task: str) -> torch.Tensor:
-        """One policy step: raw obs -> pre -> select_action -> post. Returns [action_dim]."""
+        """One policy step, served from a locally held chunk of *absolute* actions.
+
+        Chunking is ours rather than ``select_action``'s because of how relative
+        actions are undone. ``RelativeActionsProcessorStep`` caches the state it last
+        saw and the paired ``AbsoluteActionsProcessorStep`` adds that cache back, so
+        the pair is only correct when postprocessing happens against the same
+        observation that produced the prediction. Driving the policy's own queue would
+        call the preprocessor every tick while the model only ran every 50th::
+
+            tick 1  pre(obs@t1) caches t1 -> model runs -> chunk relative to t1
+                    post(action[0]) adds t1                          correct
+            tick 2  pre(obs@t2) caches t2 -> queue pops action[1]
+                    post(action[1]) adds t2                          wrong, wants t1
+
+        Every action after the first would be referenced to the wrong pose, silently:
+        nothing raises, the arm just tracks a distorted trajectory. Predicting and
+        postprocessing the whole chunk while the cache still holds the right state
+        fixes it -- ``to_absolute_actions`` takes (B, T, action_dim) and broadcasts the
+        state across time for exactly this.
+
+        Absolute-action checkpoints are unaffected either way: their unnormalize is
+        elementwise and the absolute step is disabled, so per-chunk and per-action give
+        the same numbers.
+        """
+        if self._chunk:
+            return self._chunk.popleft()
+
         observation: dict[str, object] = {OBS_STATE: state_vec}
         observation.update(images)
         observation = prepare_observation_for_inference(observation, self._device, task, robot_type="")
         observation = self._pre(observation)
-        action = self._policy.select_action(observation)
-        action = self._post(action)
-        return action.squeeze(0).cpu()
+        chunk = self._policy.predict_action_chunk(observation)
+        chunk = self._post(chunk)
+        # [1, T, action_dim] -> T tensors of [action_dim]. Only the first n_action_steps
+        # are executed; the model may predict a longer chunk_size than it commits to.
+        horizon = getattr(self._policy.config, "n_action_steps", chunk.shape[1])
+        self._chunk.extend(chunk.squeeze(0)[:horizon].cpu())
+        return self._chunk.popleft()
 
     def _send_arm(self, slider_vel: float) -> None:
         """Hold the current arm pose, sending the given slider velocity."""
@@ -262,6 +296,7 @@ class PolicyRunner:
                     self._policy.reset()
                     self._pre.reset()
                     self._post.reset()
+                    self._chunk.clear()
                     if not await self._goto_start():
                         reason = "stopped"
                         break
@@ -306,10 +341,25 @@ class PolicyRunner:
         return {"task": self._task, "reason": reason, "ticks": ticks, "elapsed_s": elapsed}
 
 
+def _policy_class(checkpoint: str):
+    """The policy class the checkpoint was saved as (``pi0`` or ``pi05``).
+
+    Dispatched off the checkpoint rather than hard-coded: the two are wire-compatible
+    here -- same camera slots, same 7-wide state, same chunking -- but pi0.5 must be
+    loaded by its own class or the state dict will not match.
+    """
+    config_path = pathlib.Path(checkpoint) / "config.json"
+    if config_path.is_file():
+        policy_type = json.loads(config_path.read_text()).get("type", "pi0")
+    else:  # a Hub repo id; let lerobot resolve it
+        policy_type = PreTrainedConfig.from_pretrained(checkpoint).type
+    return get_policy_class(policy_type)
+
+
 def _load_policy(checkpoint: str, device: str, num_steps: int):
     """Load the checkpoint, wire its normalizer, and build the processors."""
     logger.info("[policy] loading %s (downloads the PaliGemma backbone on first run)...", checkpoint)
-    policy = PI0Policy.from_pretrained(checkpoint)
+    policy = _policy_class(checkpoint).from_pretrained(checkpoint)
     policy.config.device = device
     if num_steps > 0:
         policy.config.num_inference_steps = num_steps
