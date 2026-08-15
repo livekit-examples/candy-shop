@@ -17,13 +17,18 @@
 # the untouched ~/data/candy-shop, so it is safe to try more than one.
 set -euo pipefail
 
+KEEP_FRACTION="${KEEP_FRACTION:-0.6}"
+# Names every output so two curation strengths can coexist in the bucket; the blog kept
+# ~21% of 5,688 episodes, we start at 60% of 500, and which is right at this scale is
+# exactly what a second run is for. Must be set before the paths that interpolate it.
+TAG="${TAG:-hq}"
+
 REPO_ID="${REPO_ID:-binhpham/candy-shop}"
-HQ_ID="${HQ_ID:-binhpham/candy-shop-hq}"
+HQ_ID="${HQ_ID:-binhpham/candy-shop-$TAG}"
 SRC_ROOT="${SRC_ROOT:-$HOME/data/candy-shop}"          # absolute stats, never mutated
-HQ_ROOT="${HQ_ROOT:-$HOME/data/candy-shop-hq}"
+HQ_ROOT="${HQ_ROOT:-$HOME/data/candy-shop-$TAG}"
 SARM="${SARM:-$HOME/models/sarm}"
 RABC_FULL="${RABC_FULL:-/outputs/rabc/candy-shop-rel-sarmv2-12000-s4.parquet}"
-KEEP_FRACTION="${KEEP_FRACTION:-0.6}"
 CHUNK_SIZE="${CHUNK_SIZE:-50}"
 STRIDE="${STRIDE:-4}"
 PY="${PY:-$HOME/sky_workdir/.venv/bin/python}"
@@ -38,7 +43,7 @@ echo "stage2: ranking episodes"
 DROP=$("$PY" operators/policy/curate.py \
   --progress-parquet "$RABC_FULL" \
   --keep-fraction "$KEEP_FRACTION" \
-  --out-json "$HOME/data/episode_scores.json" \
+  --out-json "$HOME/data/episode_scores_$TAG.json" \
   | tee /dev/stderr | grep -oE '^--operation.episode_indices .*' | cut -d' ' -f2-)
 
 echo "stage2: building curated dataset"
@@ -79,7 +84,7 @@ compute_sarm_progress(
 
 echo "stage2: publishing to the bucket"
 mkdir -p /outputs/datasets /outputs/rabc
-rm -rf /outputs/datasets/candy-shop-hq-rel
-cp -rL "${HQ_ROOT}-rel" /outputs/datasets/candy-shop-hq-rel
-cp "$HOME/data/rabc_progress_hq.parquet" /outputs/rabc/candy-shop-hq-rel-sarmv2-12000-s4.parquet
+rm -rf "/outputs/datasets/candy-shop-$TAG-rel"
+cp -rL "${HQ_ROOT}-rel" "/outputs/datasets/candy-shop-$TAG-rel"
+cp "$HOME/data/rabc_progress_$TAG.parquet" "/outputs/rabc/candy-shop-$TAG-rel-sarmv2-12000-s4.parquet"
 echo "stage2: DONE"
