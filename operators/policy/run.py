@@ -1,10 +1,19 @@
-"""Picker operator: serve SmolVLA (six-DOF arm) over the ``run_policy`` RPC.
+"""Picker operator: serve pi0 (six-DOF arm) over the ``run_policy`` RPC.
 
-The checkpoint is required — there is no servable stock SmolVLA, so fine-tune
-one first (see ``train.py``)::
+The checkpoint is required — there is no servable stock pi0, so fine-tune one
+first (see ``skypilot_pi0.yaml``)::
 
-    uv run policy --checkpoint outputs/smolvla-candy/pretrained_model
-    uv run policy --checkpoint <user>/smolvla-candy       # or a Hub repo id
+    uv run policy --checkpoint outputs/pi0-candy/checkpoints/005000/pretrained_model
+    uv run policy --checkpoint <user>/pi0-candy       # or a Hub repo id
+
+Checkpoints live in the bucket rather than beside the code, and lerobot's
+``last`` symlink is never written (object storage has no symlinks — see
+``shared/lerobot_patches.py``), so name a step directory explicitly::
+
+    aws s3 sync s3://candy-shop/pi0-candy/ outputs/pi0-candy/ --profile nebius
+
+Serving needs ``HF_TOKEN`` for the gated ``google/paligemma-3b-pt-224`` repo,
+not just training: the saved preprocessor tokenizes the instruction with it.
 """
 from __future__ import annotations
 
@@ -22,17 +31,17 @@ import torch
 
 from livekit.portal import Observation, Operator, OperatorConfig, RpcError, RpcInvocationData, frame_bytes_to_numpy_rgb
 
-from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+from lerobot.policies.pi0.modeling_pi0 import PI0Policy
 from lerobot.policies import make_pre_post_processors
 from lerobot.policies.utils import prepare_observation_for_inference
-from lerobot.utils.constants import ACTION, OBS_STATE
+from lerobot.utils.constants import OBS_STATE
 
 from shared.common import env_str, load_env, mint_token, pace, required_env
 from shared.config import FPS
 from shared.rest_pose import ARM_POS_KEYS, RESET_POSE_DEFAULTS, SLIDER_VEL_KEY
 
 from operators.policy.settle import SettleGate
-from operators.policy.smolvla import ACTION_NAMES, resolve_camera_map
+from operators.policy.pi0 import ACTION_NAMES, STATE_NAMES, resolve_camera_map
 
 IDENTITY = "policy-operator"
 CONFIG_PATH = pathlib.Path(__file__).resolve().parent.parent.parent / "portal.yaml"
@@ -135,11 +144,14 @@ class PolicyRunner:
     def _replan_pending(self) -> bool:
         """True when the next ``select_action`` runs the model instead of popping.
 
-        SmolVLA buffers an ``n_action_steps`` chunk (50 by default, ~1.7 s at 30
-        fps) in ``_queues[ACTION]`` and only replans once it drains (empty also
-        before the first plan).
+        pi0 buffers an ``n_action_steps`` chunk (50, ~1.7 s at 30 fps) and only
+        replans once it drains (empty also before the first plan).
+
+        Read ``_action_queue``, not the ``_queues[ACTION]`` SmolVLA used: pi0's
+        ``reset`` builds both but ``select_action`` only ever fills the former, so
+        ``_queues`` stays empty forever and would gate every tick as a replan.
         """
-        return not getattr(self._policy, "_queues", {}).get(ACTION)
+        return not getattr(self._policy, "_action_queue", None)
 
     @torch.inference_mode()
     def _infer(self, state_vec: np.ndarray, images: dict[str, np.ndarray], task: str) -> torch.Tensor:
@@ -264,7 +276,10 @@ class PolicyRunner:
                     continue
 
                 obs_ts = self._obs_ts_us
-                state_vec = np.array([self._state[key] for key in ARM_POS_KEYS], dtype=np.float32)
+                # Seven wide, including slider.vel: see STATE_NAMES. Default it to 0
+                # rather than requiring it — `ready` gates on the arm keys only, and 0
+                # is what the column held for nearly every frame pi0 trained on.
+                state_vec = np.array([self._state.get(key, 0.0) for key in STATE_NAMES], dtype=np.float32)
                 images = {key: self._frames[cam] for key, cam in self._camera_for_key.items()}
 
                 # Inference is heavy and synchronous; run it off the event loop so
@@ -293,11 +308,11 @@ class PolicyRunner:
 
 def _load_policy(checkpoint: str, device: str, num_steps: int):
     """Load the checkpoint, wire its normalizer, and build the processors."""
-    logger.info("[policy] loading %s (downloads the SmolVLM2 backbone on first run)...", checkpoint)
-    policy = SmolVLAPolicy.from_pretrained(checkpoint)
+    logger.info("[policy] loading %s (downloads the PaliGemma backbone on first run)...", checkpoint)
+    policy = PI0Policy.from_pretrained(checkpoint)
     policy.config.device = device
     if num_steps > 0:
-        policy.config.num_steps = num_steps
+        policy.config.num_inference_steps = num_steps
     policy = policy.to(device)
     policy.eval()
 
@@ -313,11 +328,11 @@ def _load_policy(checkpoint: str, device: str, num_steps: int):
 
 def add_policy_args(parser: argparse.ArgumentParser) -> None:
     """The checkpoint/inference knobs, shared with the debug driver."""
-    # No default: there is no servable stock SmolVLA checkpoint, so guessing one
+    # No default: there is no servable stock pi0 checkpoint, so guessing one
     # would only fail later, deep in a weight load.
     checkpoint = env_str("POLICY_CHECKPOINT", "")
     parser.add_argument("--checkpoint", default=checkpoint or None, required=not checkpoint,
-                        help="SmolVLA checkpoint to serve: a local fine-tune directory or a Hub "
+                        help="pi0 checkpoint to serve: a local fine-tune directory or a Hub "
                              "repo id (or set POLICY_CHECKPOINT).")
     parser.add_argument("--task", default=env_str("POLICY_TASK", "pick up the candy"))
     parser.add_argument("--device", default=env_str("POLICY_DEVICE", "cuda" if torch.cuda.is_available() else "cpu"))
@@ -341,8 +356,10 @@ def build_runner(op: Operator, args: argparse.Namespace,
     """Load the checkpoint, map cameras onto its image keys, and wire a runner onto `op`."""
     policy, preprocessor, postprocessor = _load_policy(args.checkpoint, args.device, args.num_steps)
 
+    # Off the preprocessor, not the policy config: the pipeline renames our camera
+    # keys into pi0's openpi slots, so what we feed are the pre-rename names.
     camera_for_key = resolve_camera_map(
-        policy.config,
+        preprocessor,
         env_str("POLICY_PRIMARY_CAMERA", "overhead_camera"),
         env_str("POLICY_WRIST_CAMERA", "arm_camera"),
     )
@@ -363,7 +380,7 @@ async def main() -> None:
     # read while the arguments are declared, so .env has to be in os.environ first.
     load_env(pathlib.Path(__file__).resolve().parent)
 
-    parser = argparse.ArgumentParser(description="Serve SmolVLA as a candy-shop picker operator.")
+    parser = argparse.ArgumentParser(description="Serve pi0 as a candy-shop picker operator.")
     add_policy_args(parser)
     args = parser.parse_args()
 

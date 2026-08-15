@@ -25,7 +25,7 @@ chop up the prompt; quiet them with ``RUST_LOG`` or park stderr in a file.
 
 Usage::
 
-    uv run policy-debug --checkpoint outputs/smolvla-candy/pretrained_model
+    uv run policy-debug --checkpoint outputs/pi0-candy/checkpoints/005000/pretrained_model
     RUST_LOG=error uv run policy-debug ...            # quiet native logs
     uv run policy-debug ... 2>/tmp/policy-debug.log   # or park them entirely
 """
@@ -311,7 +311,7 @@ async def main() -> None:
     # required --checkpoint) from os.environ as it declares the arguments.
     load_env(pathlib.Path(__file__).resolve().parent)
 
-    parser = argparse.ArgumentParser(description="Interactive terminal driver for the SmolVLA policy.")
+    parser = argparse.ArgumentParser(description="Interactive terminal driver for the pi0 policy.")
     add_policy_args(parser)
     args = parser.parse_args()
 
