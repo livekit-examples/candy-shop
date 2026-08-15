@@ -39,6 +39,8 @@ envs:
   BASE_SRC: /outputs/base_models/pi05_base
   BASE_HUB_ID: lerobot/pi05_base   # fallback when the bucket copy is absent
   DATASET_SRC: /outputs/datasets/candy-shop
+  # Set to skip prep entirely (stage 2). Must already carry relative stats.
+  DATASET_REL_SRC: ""
   SARM_SRC: /outputs/sarm-candy-v2/checkpoints/012000/pretrained_model
   RABC_SRC: /outputs/rabc/candy-shop-rel-sarmv2-12000-s4.parquet
   # Score every 4th frame and interpolate between. Measured 1.5 episodes/min at stride 1,
@@ -131,8 +133,21 @@ run: |
   # and relaunching is the normal way to pick up a config change here.
   mkdir -p ~/models ~/data
   rm -rf ~/data/candy-shop ~/data/candy-shop-rel ~/models/sarm
-  cp -r "$DATASET_SRC" ~/data/candy-shop
   cp -r "$SARM_SRC" ~/models/sarm
+
+  # DATASET_REL_SRC short-circuits the two prep steps below. Stage 2 trains on the
+  # curated dataset built by operators/policy/stage2_prep.sh, which already has its
+  # relative-action stats recomputed over the kept episodes and its own RABC parquet
+  # rescored against the renumbered frame index -- redoing either here would at best
+  # waste an hour and at worst reintroduce the index mismatch that prep exists to avoid.
+  if [ -n "${DATASET_REL_SRC:-}" ]; then
+    echo "dataset: pre-prepared relative copy at $DATASET_REL_SRC (skipping prep)"
+    cp -r "$DATASET_REL_SRC" ~/data/candy-shop-rel
+    PREPPED=1
+  else
+    cp -r "$DATASET_SRC" ~/data/candy-shop
+    PREPPED=0
+  fi
 
   # Weights: prefer the bucket copy, fall back to the Hub. Whether the Hub works depends
   # on which public IP this instance drew (see the header), so the fallback is a coin
@@ -153,14 +168,16 @@ run: |
   # with the wrong mean/std. Hence a separate output root: ~/data/candy-shop keeps the
   # absolute stats the pi0 serving path needs, and only -rel is trained on.
   # (new_root == root is rejected as in-place unless --operation.overwrite true.)
-  uv run --only-group train-pi0 lerobot-edit-dataset \
-    --repo_id "$DATASET_REPO_ID" \
-    --root ~/data/candy-shop \
-    --new_repo_id "$DATASET_REL_ID" \
-    --new_root ~/data/candy-shop-rel \
-    --operation.type recompute_stats \
-    --operation.relative_action true \
-    --operation.chunk_size "$CHUNK_SIZE"
+  if [ "$PREPPED" = "0" ]; then
+    uv run --only-group train-pi0 lerobot-edit-dataset \
+      --repo_id "$DATASET_REPO_ID" \
+      --root ~/data/candy-shop \
+      --new_repo_id "$DATASET_REL_ID" \
+      --new_root ~/data/candy-shop-rel \
+      --operation.type recompute_stats \
+      --operation.relative_action true \
+      --operation.chunk_size "$CHUNK_SIZE"
+  fi
 
   # Per-timestep SARM progress, which RABC differences into the training weights.
   #
