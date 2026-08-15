@@ -73,8 +73,38 @@ curation and exclude it everywhere.
    the metric that matters.
 3. `/outputs/pi05-stage2-hq40/checkpoints/000600` — only if 1 and 2 disappoint.
 
-Serving needs `operators/policy/run.py` updated for pi0.5 and relative actions; the
-current path is wired for pi0 with absolute-action norm stats.
+## Serving: a correctness bug to fix before any rollout
+
+`run.py` is wired for pi0 with absolute-action stats, so it needs a pi0.5 path
+(`PI05Policy`, `num_inference_steps`, the checkpoint's own norm stats). More important,
+**its inference loop is wrong for relative actions**, and the failure is silent.
+
+`RelativeActionsProcessorStep` caches the state it last saw; the paired
+`AbsoluteActionsProcessorStep` in the output pipeline adds
+`relative_step.get_cached_state()` back. `_infer` currently calls `_pre` and `_post`
+on *every* tick, while `select_action` only runs the model when its internal 50-step
+queue drains:
+
+    tick 1  _pre(obs@t1) caches state@t1 -> model runs -> chunk relative to t1
+            _post(action[0]) adds state@t1                        correct
+    tick 2  _pre(obs@t2) caches state@t2 -> queue pops action[1]
+            _post(action[1]) adds state@t2                        WRONG, should be t1
+
+Every action after the first in a chunk is referenced to the wrong pose. Nothing
+raises; the arm just tracks a distorted trajectory, which would be read as the policy
+being bad rather than the plumbing being wrong.
+
+The fix is to postprocess a whole chunk at prediction time, while the cache still holds
+the right state, and serve absolute actions from a local queue:
+
+    observation = self._pre(observation)
+    chunk = self._policy.predict_action_chunk(observation)   # [1, chunk, action_dim]
+    chunk = self._post(chunk)                                # absolute, all w.r.t. this state
+    self._chunk = deque(chunk.squeeze(0).cpu())              # pop one per tick, no reprocessing
+
+`_replan_pending` should then read the local queue rather than `policy._action_queue`.
+Untested here -- it is arm-control code and there was no hardware in the loop -- so
+verify against a stationary arm before a real rollout.
 
 ## Operational notes
 
