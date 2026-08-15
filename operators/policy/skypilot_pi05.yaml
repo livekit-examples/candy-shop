@@ -155,20 +155,21 @@ run: |
 
   # Per-timestep SARM progress, which RABC differences into the training weights.
   #
-  # Calling compute_sarm_progress directly rather than the module's own CLI: that CLI
-  # declares --push-to-hub as store_true with default=True, so the flag cannot be turned
-  # off, and it ends by unconditionally api.upload_file()-ing the parquet to the dataset
-  # repo with no try/except. Unattended that either aborts the run (no token) or pushes
-  # to the Hub repo unasked. The library function does the same computation and stops at
-  # writing the file. dataset_repo_id takes a local path.
   # Cached in the bucket because it is a property of (dataset, SARM checkpoint) only —
   # nothing about the policy or the GPU count enters into it. Scoring runs single-process
-  # at ~7.8 frames/s, i.e. ~3.3 h for our 92,941 frames, which is worth paying once on
-  # one GPU rather than on every fan-out of eight.
+  # at ~7.8 frames/s, i.e. ~3.3 h for our 92,941 frames, worth paying once on one GPU
+  # rather than on every fan-out of eight. Recompute it if the episode set changes:
+  # weights are keyed on the dataset-global frame index (see operators/policy/curate.py).
   if [ -f "$RABC_SRC" ]; then
     echo "rabc progress: cached at $RABC_SRC"
     cp "$RABC_SRC" ~/data/rabc_progress.parquet
   else
+    # Calling compute_sarm_progress directly rather than the module's own CLI: that CLI
+    # declares --push-to-hub as store_true with default=True, so the flag cannot be
+    # turned off, and it ends by unconditionally api.upload_file()-ing the parquet to
+    # the dataset repo with no try/except. Unattended that either aborts the run (no
+    # token) or pushes to the Hub repo unasked. The library function does the same
+    # computation and stops at writing the file. dataset_repo_id takes a local path.
     echo "rabc progress: not cached, scoring (~3.3 h)"
     uv run --only-group train-reward python -c "
   from lerobot.rewards.sarm.compute_rabc_weights import compute_sarm_progress
