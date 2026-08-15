@@ -57,6 +57,13 @@ envs:
   STEPS: 6000
   SAVE_FREQ: 500
 
+  # Held-out episodes give an objective way to pick among the 12 checkpoints instead of
+  # taking the last one. lerobot holds out the final ceil(n*eval_split) episodes per
+  # task, so 0.05 is 25 of our 500, and logs "eval_loss" every EVAL_STEPS. Real ranking
+  # still needs rollouts on the arm -- this only avoids shipping an overfit checkpoint.
+  EVAL_SPLIT: "0.05"
+  EVAL_STEPS: 250
+
   # 4 per rank x 8 ranks = 32 dataloader workers. The reward run already hit shm limits
   # at 8 workers on one process; do not raise this without checking /dev/shm.
   NUM_WORKERS: 4
@@ -202,5 +209,7 @@ run: |
     --steps "$STEPS" \
     --save_freq "$SAVE_FREQ" \
     --num_workers "$NUM_WORKERS" \
+    --dataset.eval_split "$EVAL_SPLIT" \
+    --eval_steps "$EVAL_STEPS" \
     --wandb.enable false \
     ${EXTRA_ARGS:-}
