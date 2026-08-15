@@ -60,13 +60,22 @@ rm -rf "${HQ_ROOT}-rel"
   --operation.relative_action true \
   --operation.chunk_size "$CHUNK_SIZE"
 
+# Rescore rather than reuse: delete_episodes renumbered the frame index the weights are
+# keyed on. Single process -- scoring is video-decode bound at ~8 episodes/min, so the
+# curated set costs ~40 min. Sharding it by passing `episodes=` to LeRobotDataset does
+# NOT work: compute_sarm_progress indexes the dataset by global frame index while a
+# subset re-indexes positionally, so it dies with IndexError out of bounds.
 echo "stage2: rescoring SARM progress on the curated dataset"
-"$PY" -m operators.policy.score_shard \
-  --repo_id "${HQ_ID}-rel" \
-  --dataset-root "${HQ_ROOT}-rel" \
-  --reward-model-path "$SARM" \
-  --output "$HOME/data/rabc_progress_hq.parquet" \
-  --shard-index 0 --num-shards 1 --stride "$STRIDE"
+"$PY" -c "
+from lerobot.rewards.sarm.compute_rabc_weights import compute_sarm_progress
+import os
+compute_sarm_progress(
+    dataset_repo_id=os.path.expanduser('${HQ_ROOT}-rel'),
+    reward_model_path=os.path.expanduser('$SARM'),
+    output_path=os.path.expanduser('$HOME/data/rabc_progress_hq.parquet'),
+    head_mode='sparse', device='cuda', num_visualizations=0, stride=$STRIDE,
+)
+"
 
 echo "stage2: publishing to the bucket"
 mkdir -p /outputs/datasets /outputs/rabc
