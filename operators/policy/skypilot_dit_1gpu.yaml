@@ -26,21 +26,16 @@ workdir: .
 # provision on three of six attempts today. H200 and B200 are the same 8-GPU shape, so
 # the recipe is identical on any of them -- let SkyPilot take whichever has capacity
 # rather than queueing behind the most contended one.
-# Pinned to eu-north1: that is where the Nebius project and the candy-shop bucket live.
-# Left unpinned, SkyPilot found H200:8 in eu-west1 and the cluster immediately failed
-# with "No project found for region" -- and the /outputs mount would have been
-# cross-region regardless.
+# Single GPU. The 8-GPU shape existed only to reach the docs' recommended effective
+# batch of 320; the model itself is ~450M params and fits comfortably on one card. With
+# eu-north1 out of 8-GPU nodes (36 consecutive provisioning failures), one H100 at the
+# docs' minimum batch of 64 starts now instead of queueing indefinitely.
 resources:
   any_of:
-    - accelerators: H100:8
-      region: eu-north1
-      disk_size: 1024
-    - accelerators: H200:8
-      region: eu-north1
-      disk_size: 1024
-    - accelerators: B200:8
-      region: eu-north1
-      disk_size: 1024
+    - accelerators: H100:1
+      disk_size: 512
+    - accelerators: H200:1
+      disk_size: 512
 
 envs:
   CHECKPOINT_BUCKET: candy-shop
@@ -50,12 +45,14 @@ envs:
 
   # Docs: minimum 64, recommended 256-320, and their own LIBERO run used 320.
   # 83,405 frames / 320 = 261 steps per epoch.
-  BATCH_SIZE: 40          # per process, x8 = 320 effective
-  NUM_PROCESSES: 8
+  # Docs' stated minimum; they warn below 64 is unstable. Effective batch is 64 here
+  # rather than 320, which is the real cost of dropping to one GPU.
+  BATCH_SIZE: 64
+  NUM_PROCESSES: 1
 
   # ">30k steps recommended for a single task"; we have five, and their LIBERO
   # multitask run went to 100k. 60k is ~230 epochs here.
-  STEPS: 60000
+  STEPS: 30000
   SAVE_FREQ: 5000
   EVAL_STEPS: 2500
   EVAL_SPLIT: "0.05"
@@ -121,9 +118,7 @@ run: |
   rm -rf ~/data/candy-train
   cp -r "$DATASET_SRC" ~/data/candy-train
 
-  uv run --only-group train-dit accelerate launch \
-    --multi_gpu --num_processes "$NUM_PROCESSES" \
-    -m operators.policy.train_fast \
+  uv run --only-group train-dit python -m operators.policy.train_fast \
     --policy.type=multi_task_dit \
     --policy.device=cuda \
     --policy.push_to_hub=false \
