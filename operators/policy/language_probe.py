@@ -36,6 +36,32 @@ from lerobot.policies import make_pre_post_processors
 from lerobot.policies.factory import get_policy_class
 
 
+def action_chunk(policy, post, batch):
+    """The chunk the policy would execute, for either policy family.
+
+    pi0/pi0.5 expose ``predict_action_chunk`` as a pure function of one observation.
+    multi_task_dit does not: it keeps observation deques (``n_obs_steps`` frames of
+    history) that ``select_action`` fills via ``populate_queues``, and calling
+    ``predict_action_chunk`` directly on a fresh policy dies with "stack expects a
+    non-empty TensorList". So drive it the way the runtime does -- reset, then pop
+    ``n_action_steps`` actions; only the first call runs the model, the rest dequeue.
+    """
+    queue_based = getattr(policy, "_queues", None) is not None
+    if not queue_based:
+        with torch.inference_mode():
+            out = policy.predict_action_chunk(batch)
+        return post(out).squeeze(0).cpu().numpy()
+
+    policy.reset()
+    steps = getattr(policy.config, "n_action_steps", 1)
+    actions = []
+    with torch.inference_mode():
+        for _ in range(steps):
+            a = policy.select_action(dict(batch))
+            actions.append(post(a).squeeze(0).cpu().numpy())
+    return np.stack(actions)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--checkpoint", required=True)
@@ -83,9 +109,7 @@ def main() -> None:
                         batch[cam] = batch[cam].to(dtype=torch.float32) / 255.0
                 torch.manual_seed(r)
                 processed = pre(batch)
-                with torch.inference_mode():
-                    out = policy.predict_action_chunk(processed)
-                reps.append(post(out).squeeze(0).cpu().numpy())
+                reps.append(action_chunk(policy, post, processed))
             chunks[task] = reps
             for a, b in itertools.combinations(reps, 2):
                 within.append(np.abs(a - b).mean())
