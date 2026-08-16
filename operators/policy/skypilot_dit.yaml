@@ -26,21 +26,18 @@ workdir: .
 # provision on three of six attempts today. H200 and B200 are the same 8-GPU shape, so
 # the recipe is identical on any of them -- let SkyPilot take whichever has capacity
 # rather than queueing behind the most contended one.
-# Pinned to eu-north1: that is where the Nebius project and the candy-shop bucket live.
-# Left unpinned, SkyPilot found H200:8 in eu-west1 and the cluster immediately failed
-# with "No project found for region" -- and the /outputs mount would have been
-# cross-region regardless.
+# Single GPU, because 8-GPU nodes in eu-north1 are exhausted and waiting cost more than
+# the batch size is worth. Pinned to eu-north1: the Nebius project and candy-shop bucket
+# are both there, and an unpinned launch found H200:8 in eu-west1 only to die with
+# "No project found for region".
 resources:
   any_of:
-    - accelerators: H100:8
+    - accelerators: H100:1
       region: eu-north1
-      disk_size: 1024
-    - accelerators: H200:8
+      disk_size: 512
+    - accelerators: H200:1
       region: eu-north1
-      disk_size: 1024
-    - accelerators: B200:8
-      region: eu-north1
-      disk_size: 1024
+      disk_size: 512
 
 envs:
   CHECKPOINT_BUCKET: candy-shop
@@ -48,10 +45,13 @@ envs:
   DATASET_SRC: /outputs/datasets/candy-train-abs
   DATASET_REPO_ID: binhpham/candy-shop-train
 
-  # Docs: minimum 64, recommended 256-320, and their own LIBERO run used 320.
-  # 83,405 frames / 320 = 261 steps per epoch.
-  BATCH_SIZE: 40          # per process, x8 = 320 effective
-  NUM_PROCESSES: 8
+  # One process, so this IS the effective batch. lerobot's trainer has no gradient
+  # accumulation, so a single GPU cannot reach the recommended 256-320: CLIP encodes
+  # 2 cameras x 2 obs steps = 4 images per sample, and 320 x 4 image forwards with
+  # gradients does not fit in 80 GB. 96 clears the documented minimum of 64 (below
+  # which they warn training is unstable) rather than sitting on it.
+  BATCH_SIZE: 96
+  NUM_PROCESSES: 1
 
   # ">30k steps recommended for a single task"; we have five, and their LIBERO
   # multitask run went to 100k. 60k is ~230 epochs here.
@@ -73,12 +73,13 @@ envs:
   HIDDEN_DIM: 768
   NUM_HEADS: 12
 
-  # clip-vit-large-patch14 rather than base-patch16 because the instructions have to
-  # stay as brand names ("pick up a twix"). CLIP was trained on web alt-text and has
-  # very likely seen this packaging, so the larger encoder is doing the brand->pixels
-  # work we are otherwise asking ~90 episodes per candy to teach from scratch.
-  VISION_ENCODER: openai/clip-vit-large-patch14
-  TEXT_ENCODER: openai/clip-vit-large-patch14
+  # base-patch16 rather than large-patch14 on one GPU: L/14 is ~304M against B/16's
+  # ~86M, and spending that memory on the encoder would force the batch below the
+  # documented minimum. B/16 is also what their published LIBERO result (90.6%) used.
+  # The cost is brand recognition -- which is exactly what the descriptive-instruction
+  # arm compensates for, by giving CLIP colour words it already grounds.
+  VISION_ENCODER: openai/clip-vit-base-patch16
+  TEXT_ENCODER: openai/clip-vit-base-patch16
 
   # Docs' LR for the LIBERO run; the default 2e-5 is for the small single-task config.
   # Tuning range they give is 1e-5 to 3e-4.
@@ -121,9 +122,7 @@ run: |
   rm -rf ~/data/candy-train
   cp -r "$DATASET_SRC" ~/data/candy-train
 
-  uv run --only-group train-dit accelerate launch \
-    --multi_gpu --num_processes "$NUM_PROCESSES" \
-    -m operators.policy.train_fast \
+  uv run --only-group train-dit python -m operators.policy.train_fast \
     --policy.type=multi_task_dit \
     --policy.device=cuda \
     --policy.push_to_hub=false \
