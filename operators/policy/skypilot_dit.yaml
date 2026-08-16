@@ -147,7 +147,7 @@ run: |
     --policy.use_amp=true \
     ${OBJECTIVE_ARGS} \
     --dataset.repo_id="$DATASET_REPO_ID" \
-    --dataset.root=~/data/candy-train \
+    --dataset.root="$HOME/data/candy-train" \
     --dataset.video_backend=torchcodec \
     --dataset.image_transforms.enable=true \
     --dataset.image_transforms.max_num_transforms=3 \
