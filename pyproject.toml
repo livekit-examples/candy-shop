@@ -50,6 +50,12 @@ train-pi0 = [
     { include-group = "train" },
     "lerobot[pi]==0.6.1",
 ]
+# operators/policy/skypilot_dit.yaml: multi_task_dit pulls CLIP vision+text encoders
+# through transformers, which the pi/smolvla extras do not bring in.
+train-dit = [
+    { include-group = "train" },
+    "lerobot[multi_task_dit]==0.6.1",
+]
 # operators/reward/skypilot.yaml: SARM's encoding processor imports faker (and the
 # rest of the sarm extra) at construction, so reward training needs it on top of
 # the shared training stack. matplotlib is not part of that extra but sits at the top
