@@ -1,5 +1,53 @@
 # pi0.5 folding-recipe runs, 2026-08-15
 
+> **Round 2 (below, "Controlled comparison") supersedes the round-1 conclusions.**
+> Round 1 could not compare models: each run held out its own 5% *after* curation had
+> reshuffled the episodes, so no two were scored on the same data. Round 2 carves a
+> stratified 50-episode holdout off the raw dataset first, excludes it everywhere, and
+> scores every arm on it in joint units.
+
+## Controlled comparison (the one to trust)
+
+450 training episodes / 50 held out, stratified 10 per task. Mean absolute error between
+the predicted action chunk and what the operator actually did, in joint units, over 382
+samples spanning all 50 episodes.
+
+| Arm | What | h1 | h10 | h25 | h50 |
+|:---|:---|---:|---:|---:|---:|
+| C | stage 2 on a **random** 270 | 3.517 | 4.906 | 6.736 | **8.716** |
+| A | **stage 1 only**, all 450 | 3.559 | 5.004 | 6.839 | **8.827** |
+| B | stage 2 on the **SARM-curated** 270 | 3.732 | 5.169 | 7.019 | **9.136** |
+| E | stage 1, **backbone trainable** | 4.009 | 5.485 | 7.318 | **9.369** |
+
+**SARM curation does not help; it slightly hurts.** B is worse than the random control at
+every horizon, and worse than doing no stage 2 at all. The blog curated 5,688 raw
+episodes containing real failures and several competing strategies, and cutting to 21%
+removed genuine garbage. Every episode here already completes the task, so ranking them
+by SARM progress selects on something other than quality, and discarding 180 of 450 costs
+more than the ranking returns. Their largest single lever does not transfer.
+
+**The two-stage recipe does not transfer either.** Stage 1 alone beats the curated
+fine-tune and ties the random one.
+
+**Freezing the VLM is confirmed**, now on a matched comparison: E is worst here, and its
+own curve rises monotonically from its first eval (0.0719 at step 250 to 0.1333 at 3000)
+while A falls to 0.0664. Identical data, steps, schedule and LR; only the trainable
+parameter set differs.
+
+**Ship arm A**: `/outputs/arm-a-stage1/checkpoints/002250`, pi0.5, `train_expert_only`,
+relative actions, RABC, no curation. Simplest pipeline and among the best measured.
+
+**What this does not establish.** A, B and C sit within 1-5% of each other with no seed
+replicates, and a replicate in round 1 showed differences that size can be noise; only
+E's 6% gap is comfortably outside it. So "curation is not earning its cost" and "backbone
+training is harmful" are supported; "A beats C" is not. And all of it is open-loop
+imitation error, which rewards matching the demonstration rather than succeeding at the
+task -- the arm is still the only thing that settles that.
+
+---
+
+## Round 1 (superseded, kept for the reasoning)
+
 Applying the LeRobot folding recipe (https://huggingface.co/spaces/lerobot/robot-folding)
 to candy-shop: 500 episodes, 92,941 frames, 30 fps, 2 cameras. Everything below ran on
 8xH100 at effective batch 256, the blog's own figure, via
