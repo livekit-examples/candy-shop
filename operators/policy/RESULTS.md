@@ -112,14 +112,16 @@ sets were built by ranking all 500 episodes, so stage 1's eval episodes leak int
 2's training data. Next time, carve a fixed holdout off the raw dataset *before* any
 curation and exclude it everywhere.
 
-## Candidates for rollout, in order
+## Candidates for rollout (SUPERSEDED -- see the controlled comparison at the top)
 
-1. `/outputs/pi05-stage2-hq60/checkpoints/000100` and `.../000150` — plus
-   `/outputs/pi05-stage2-hq60-seed2/checkpoints/000100`. Treat as a tie; rollouts break it.
-2. `/outputs/pi05-candy-expertonly/checkpoints/002500` — the stage-1 model, no curation.
-   Worth testing: it is the simplest pipeline, and stage 2's advantage is unproven on
-   the metric that matters.
-3. `/outputs/pi05-stage2-hq40/checkpoints/000600` — only if 1 and 2 disappoint.
+These were ranked on per-run eval splits that were not comparable to each other, and the
+ordering did not survive a common holdout: the curated stage-2 models listed first here
+came out *behind* both the random control and plain stage 1. Use
+`/outputs/arm-a-stage1/checkpoints/002250` instead.
+
+~~1. `pi05-stage2-hq60/checkpoints/000100` / `000150` / seed2 `000100`~~
+~~2. `pi05-candy-expertonly/checkpoints/002500`~~
+~~3. `pi05-stage2-hq40/checkpoints/000600`~~
 
 ## Serving: a correctness bug, found and fixed
 
