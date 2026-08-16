@@ -22,9 +22,18 @@ name: dit-candy
 
 workdir: .
 
+# Nebius offers H100 and H200 in 1 or 8 only (no 4), and 8xH100 in eu-north1 failed to
+# provision on three of six attempts today. H200 and B200 are the same 8-GPU shape, so
+# the recipe is identical on any of them -- let SkyPilot take whichever has capacity
+# rather than queueing behind the most contended one.
 resources:
-  accelerators: H100:8
-  disk_size: 1024
+  any_of:
+    - accelerators: H100:8
+      disk_size: 1024
+    - accelerators: H200:8
+      disk_size: 1024
+    - accelerators: B200:8
+      disk_size: 1024
 
 envs:
   CHECKPOINT_BUCKET: candy-shop
