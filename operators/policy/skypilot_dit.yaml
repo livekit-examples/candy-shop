@@ -54,10 +54,13 @@ envs:
   BATCH_SIZE: 160
   NUM_PROCESSES: 1
 
-  # ">30k steps recommended for a single task"; we have five, and their LIBERO
-  # multitask run went to 100k. 60k is ~230 epochs here.
-  STEPS: 60000
-  SAVE_FREQ: 5000
+  # Their LIBERO run was 100k steps x batch 320 = 32M samples over a large multi-task
+  # suite, i.e. tens of epochs. Copying the step count instead of the epoch count is the
+  # same error as porting the folding blog's 200k pi0.5 steps: 60k x 160 here would be
+  # 9.6M samples over 83,405 frames = 115 epochs, several times their reference. 30k is
+  # ~58 epochs, inside their range. Eval every 2500 steps decides where to actually stop.
+  STEPS: 30000
+  SAVE_FREQ: 2500
   EVAL_STEPS: 2500
   EVAL_SPLIT: "0.05"
 
