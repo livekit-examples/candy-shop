@@ -47,10 +47,11 @@ envs:
 
   # One process, so this IS the effective batch. lerobot's trainer has no gradient
   # accumulation, so a single GPU cannot reach the recommended 256-320: CLIP encodes
-  # 2 cameras x 2 obs steps = 4 images per sample, and 320 x 4 image forwards with
-  # gradients does not fit in 80 GB. 96 clears the documented minimum of 64 (below
-  # which they warn training is unstable) rather than sitting on it.
-  BATCH_SIZE: 96
+  # 2 cameras x 2 obs steps = 4 images per sample. Measured at batch 96 the run used
+  # 43 of 80 GB; ~7 GB of that is fixed (weights + Adam + grads for ~450M params), so
+  # activations cost ~0.375 GB/sample and 160 lands near 67 GB with margin. Still under
+  # the recommended 256, which remains the argument for an 8-GPU node when one frees.
+  BATCH_SIZE: 160
   NUM_PROCESSES: 1
 
   # ">30k steps recommended for a single task"; we have five, and their LIBERO
