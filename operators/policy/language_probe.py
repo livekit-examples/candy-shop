@@ -68,7 +68,12 @@ def main() -> None:
     parser.add_argument("--dataset-root", required=True)
     parser.add_argument("--repo-id", default="binhpham/candy-shop-holdout")
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--num-steps", type=int, default=10)
+    parser.add_argument("--num-steps", type=int, default=0,
+                        help="Override the checkpoint's inference steps. 0 keeps its own "
+                             "setting, which matters for DDPM: these DiT arms train with "
+                             "100 timesteps, and forcing 10 without switching to DDIM "
+                             "under-integrates the reverse process and inflates the "
+                             "sampling noise this probe divides by.")
     parser.add_argument("--frames", type=int, default=6,
                         help="How many distinct observations to probe.")
     parser.add_argument("--repeats", type=int, default=3,
@@ -78,8 +83,11 @@ def main() -> None:
     policy_type = json.loads((pathlib.Path(args.checkpoint) / "config.json").read_text())["type"]
     policy = get_policy_class(policy_type).from_pretrained(args.checkpoint)
     policy.config.device = args.device
-    if hasattr(policy.config, "num_inference_steps"):
+    if args.num_steps > 0 and hasattr(policy.config, "num_inference_steps"):
         policy.config.num_inference_steps = args.num_steps
+    print("inference steps:", getattr(policy.config, "num_inference_steps", None),
+          "| scheduler:", getattr(policy.config, "noise_scheduler_type", "n/a"),
+          "| train timesteps:", getattr(policy.config, "num_train_timesteps", "n/a"))
     policy = policy.to(args.device).eval()
     pre, post = make_pre_post_processors(
         policy_cfg=policy.config, pretrained_path=args.checkpoint,
