@@ -29,7 +29,7 @@ import logging
 import os
 import pathlib
 import time
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -45,6 +45,8 @@ from lerobot.utils.constants import OBS_STATE
 from shared.common import env_str, load_env, mint_token, pace, required_env
 from shared.config import FPS
 from shared.rest_pose import ARM_POS_KEYS, RESET_POSE_DEFAULTS, SLIDER_VEL_KEY
+
+import cv2
 
 from operators.policy.settle import SettleGate
 from operators.policy.pi0 import ACTION_NAMES, STATE_NAMES, resolve_camera_map
@@ -70,6 +72,26 @@ def _now_us() -> int:
     return int(time.time() * 1_000_000)
 
 
+def _expected_image_hw(policy_config: Any) -> dict[str, tuple[int, int]]:
+    """The (height, width) each image key was trained at, from the checkpoint.
+
+    Live cameras do not necessarily match the dataset: here the wrist streams 360x480
+    while every recorded frame is 480x640. pi0 tolerates that because its preprocessor
+    resizes each image on its own, but multi_task_dit stacks the camera views into one
+    tensor before any resizing (`_prepare_batch`), so mismatched sizes raise "stack
+    expects each tensor to be equal size". Feeding the trained resolution is also just
+    more faithful -- it removes a scale shift between training and serving for every
+    architecture.
+    """
+    features = getattr(policy_config, "input_features", None) or {}
+    shapes: dict[str, tuple[int, int]] = {}
+    for key, feature in features.items():
+        shape = getattr(feature, "shape", None)
+        if shape is not None and len(shape) == 3 and str(key).startswith("observation.images"):
+            shapes[key] = (int(shape[1]), int(shape[2]))
+    return shapes
+
+
 def _payload_task(data: RpcInvocationData, default: str) -> str:
     """Parse an instruction from a bare string or ``{"task"|"instruction": ...}``."""
     payload = (data.payload or "").strip()
@@ -92,6 +114,7 @@ class PolicyRunner:
 
     def __init__(self, op: Operator, *, fps: int, device: str, duration_s: float,
                  policy, preprocessor, postprocessor, camera_for_key: dict[str, str],
+                 image_hw: dict[str, tuple[int, int]] | None = None,
                  settle_tolerance: float, settle_timeout_s: float,
                  start_ramp_s: float = 2.0, start_tolerance: float = 3.0,
                  on_tick: Callable[[dict], None] | None = None) -> None:
@@ -103,6 +126,7 @@ class PolicyRunner:
         self._pre = preprocessor
         self._post = postprocessor
         self._camera_for_key = camera_for_key  # policy image key -> physical camera name
+        self._image_hw = image_hw or {}  # policy image key -> (h, w) it was trained at
         self._settle = SettleGate(
             keys=ARM_POS_KEYS, tolerance=settle_tolerance, timeout_s=settle_timeout_s
         )
@@ -156,6 +180,13 @@ class PolicyRunner:
         :meth:`_infer`), so ``policy._action_queue`` is never filled at all.
         """
         return not self._chunk
+
+    def _resize_for(self, key: str, frame: np.ndarray) -> np.ndarray:
+        """Scale a live frame to the resolution this key was recorded at."""
+        target = self._image_hw.get(key)
+        if target is None or frame.shape[:2] == target:
+            return frame
+        return cv2.resize(frame, (target[1], target[0]), interpolation=cv2.INTER_AREA)
 
     @torch.inference_mode()
     def _infer(self, state_vec: np.ndarray, images: dict[str, np.ndarray], task: str) -> torch.Tensor:
@@ -328,7 +359,8 @@ class PolicyRunner:
                 # rather than requiring it — `ready` gates on the arm keys only, and 0
                 # is what the column held for nearly every frame pi0 trained on.
                 state_vec = np.array([self._state.get(key, 0.0) for key in STATE_NAMES], dtype=np.float32)
-                images = {key: self._frames[cam] for key, cam in self._camera_for_key.items()}
+                images = {key: self._resize_for(key, self._frames[cam])
+                          for key, cam in self._camera_for_key.items()}
 
                 # Inference is heavy and synchronous; run it off the event loop so
                 # Portal keeps delivering fresh observations between ticks.
@@ -433,6 +465,7 @@ def build_runner(op: Operator, args: argparse.Namespace,
         op, fps=FPS, device=args.device, duration_s=args.duration,
         policy=policy, preprocessor=preprocessor, postprocessor=postprocessor,
         camera_for_key=camera_for_key,
+        image_hw=_expected_image_hw(policy.config),
         settle_tolerance=args.settle_tolerance, settle_timeout_s=args.settle_timeout,
         start_ramp_s=args.start_ramp, start_tolerance=args.start_tolerance,
         on_tick=on_tick,
