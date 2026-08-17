@@ -66,7 +66,7 @@ run_arm() {
   # arms for exactly that reason -- SkyPilot's own run block has a fuller environment.
   "$HOME/sky_workdir/.venv/bin/accelerate" launch \
     --multi_gpu --num_processes 8 \
-    -m operators.policy.train_fast \
+    -m operators.policy.train \
     --policy.path "$HOME/models/base-$name" \
     --policy.dtype bfloat16 \
     --policy.push_to_hub false \
