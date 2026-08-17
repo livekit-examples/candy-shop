@@ -126,7 +126,7 @@ run: |
   rm -rf ~/data/candy-train
   cp -r "$DATASET_SRC" ~/data/candy-train
 
-  uv run --only-group train-dit python -m operators.policy.train_fast \
+  uv run --only-group train-dit python -m operators.policy.train \
     --policy.type=multi_task_dit \
     --policy.device=cuda \
     --policy.push_to_hub=false \
