@@ -7,7 +7,12 @@ dependencies = [
     "livekit-portal>=0.2.4",
     "livekit-api>=0.7",
     "livekit>=1.1.8",
-    "lerobot[feetech,smolvla,dataset]==0.6.1",
+    # multi_task_dit is here rather than only in the training group because serving a
+    # DiT checkpoint needs its diffusers-backed scheduler at load time. Without it the
+    # policy operator dies with "'diffusers' is required but not installed" -- and
+    # get_policy_class("multi_task_dit") succeeds regardless, so the gap is not visible
+    # until a checkpoint is actually loaded.
+    "lerobot[feetech,smolvla,dataset,multi_task_dit]==0.6.1",
     "lerobot_robot_so101_slider",
     "lerobot_teleoperator_so101_with_slider",
     "pynput>=1.7",          # teleoperator leader: arrow keys drive slider.vel
