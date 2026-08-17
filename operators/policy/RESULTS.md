@@ -1,4 +1,57 @@
-# pi0.5 folding-recipe runs, 2026-08-15
+# candy-shop policy runs, 2026-08-15/16
+
+> **RESOLVED: ship `multi_task_dit`, not pi0.5.** Everything below about pi0.5 is
+> superseded by robot testing. Both DiT arms pick the right candy; every pi0.5 variant
+> picks the wrong one.
+
+## What works
+
+`/outputs/dit-orig/checkpoints/007500/pretrained_model` -- multi_task_dit, batch 160,
+CLIP B/16, horizon 32 / 24 action steps, trained on the plain instructions
+("pick up a twix"). Verified on the arm. Serve it with no changes to the voice agent.
+
+The descriptive-instruction arm (`dit-desc`, "pick up a twix, the gold wrapped chocolate
+bar") also works, so the wording was never the problem and the extra dataset was not
+needed. Prefer `dit-orig`: identical behaviour, no serving-side instruction rewriting.
+
+## Why pi0.5 failed and DiT did not
+
+The five tasks differ only by instruction, and the candies sit in four fixed bins (Twix
+gold top-left, KitKat red top-right, Snickers dark-brown bottom-left, Nerds magenta
+bottom-right), so picking the wrong candy means reaching the wrong bin. That needs the
+vision encoder to learn what these wrappers look like in this scene.
+
+`train_expert_only` freezes pi0.5's vision tower outright, so it never can. Unfreezing it
+(`freeze_vision_encoder`, arm E) degraded instead: eval_loss rose monotonically from
+0.0719 at step 250 to 0.1333 at 3000, and the arm still picked wrong. multi_task_dit
+trains its CLIP vision encoder at 0.1x LR while keeping the text encoder frozen, which is
+the capability neither pi0.5 configuration had. lerobot's own docs list this failure under
+"Executing the Wrong Task" and "Multiple similar tasks".
+
+## Every offline metric here was wrong
+
+Recorded because it cost days. Not one of the metrics below predicted robot behaviour:
+
+* **Flow-matching / diffusion `eval_loss`** averages over the five tasks, so a policy that
+  ignores the prompt and reaches toward an average candy scores well. The shipped DiT
+  checkpoint was taken from the middle of a run whose eval_loss was *rising*
+  (0.0214 -> 0.0223 -> 0.0233), which I read as overfitting and blamed on the learning
+  rate. It works on the arm.
+* **Holdout chunk error in joint units** (`eval_holdout.py`) has the same blind spot: it
+  averages across tasks, so wrong-bin behaviour barely moves it. It ranked four pi0.5
+  checkpoints that all fail the task.
+* **The language probe** (`language_probe.py`) reported 0.80x on the DiT checkpoint at
+  step 2500 -- "effectively ignoring the instruction". The step-7500 checkpoint of that
+  same run picks the right candy. It was measuring an under-trained model, not the
+  architecture.
+
+The folding blog said as much -- their significant results came only from rollouts -- and
+it still took a robot test to settle this. Test on the arm early, at a mid-training
+checkpoint, before building any offline apparatus.
+
+---
+
+# pi0.5 folding-recipe runs, 2026-08-15 (superseded)
 
 > **Round 2 (below, "Controlled comparison") supersedes the round-1 conclusions.**
 > Round 1 could not compare models: each run held out its own 5% *after* curation had
