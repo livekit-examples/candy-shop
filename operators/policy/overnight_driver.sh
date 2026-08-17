@@ -25,7 +25,7 @@ RENAME_MAP='{"observation.images.overhead_camera": "observation.images.base_0_rg
 log() { echo "[driver $(date -u +%H:%M:%S)] $*"; }
 
 log "waiting for arm A to finish"
-while pgrep -f "operators.policy.train_fast" >/dev/null; do sleep 60; done
+while pgrep -f "operators.policy.train" >/dev/null; do sleep 60; done
 log "arm A finished"
 
 # Pick A's best checkpoint by held-out loss rather than taking the last one. Eval runs
