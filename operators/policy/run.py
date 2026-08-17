@@ -190,11 +190,24 @@ class PolicyRunner:
         observation.update(images)
         observation = prepare_observation_for_inference(observation, self._device, task, robot_type="")
         observation = self._pre(observation)
+
+        horizon = getattr(self._policy.config, "n_action_steps", 1)
+        if getattr(self._policy, "_queues", None) is not None:
+            # multi_task_dit keeps observation deques (n_obs_steps frames of history) that
+            # only `select_action` fills, so calling predict_action_chunk on it raises
+            # "stack expects a non-empty TensorList". Drive it the way it expects: the
+            # first call generates the chunk, the rest dequeue without re-running the
+            # model. Relative actions are not a concern here -- it trains on absolute.
+            self._policy.reset()
+            for _ in range(horizon):
+                action = self._policy.select_action(dict(observation))
+                self._chunk.append(self._post(action).squeeze(0).cpu())
+            return self._chunk.popleft()
+
         chunk = self._policy.predict_action_chunk(observation)
         chunk = self._post(chunk)
         # [1, T, action_dim] -> T tensors of [action_dim]. Only the first n_action_steps
         # are executed; the model may predict a longer chunk_size than it commits to.
-        horizon = getattr(self._policy.config, "n_action_steps", chunk.shape[1])
         self._chunk.extend(chunk.squeeze(0)[:horizon].cpu())
         return self._chunk.popleft()
 
