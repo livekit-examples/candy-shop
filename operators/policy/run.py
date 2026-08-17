@@ -1,14 +1,13 @@
-"""Picker operator: serve pi0 or pi0.5 (six-DOF arm) over the ``run_policy`` RPC.
+"""Picker operator: serve multi_task_dit (six-DOF arm) over the ``run_policy`` RPC.
 
-The checkpoint is required — neither has a servable stock checkpoint, so fine-tune
-one first (``skypilot_pi0.yaml`` / ``skypilot_pi05.yaml``)::
+DiT-only by choice, not by accident: on the arm, every pi0.5 variant picked the wrong
+candy and both DiT arms picked the right one, so the multi-architecture serving path was
+removed rather than left to rot. See operators/policy/RESULTS.md for the comparison, and
+git history for the pi0/pi0.5/SmolVLA paths if they are ever wanted back.
 
-    uv run policy --checkpoint outputs/pi0-candy/checkpoints/005000/pretrained_model
-    uv run policy --checkpoint <user>/pi0-candy       # or a Hub repo id
+Fine-tune one first (``skypilot_dit.yaml``); there is no servable stock checkpoint::
 
-Which architecture to load is read from the checkpoint's own ``config.json``; pi0.5
-additionally arrives with ``use_relative_actions``, which is why chunking is driven
-here rather than by ``select_action`` (see :meth:`PolicyRunner._infer`).
+    uv run policy --checkpoint outputs/dit-orig/checkpoints/007500/pretrained_model
 
 Checkpoints live in the bucket rather than beside the code, and lerobot's
 ``last`` symlink is never written (object storage has no symlinks — see
@@ -16,8 +15,8 @@ Checkpoints live in the bucket rather than beside the code, and lerobot's
 
     aws s3 sync s3://candy-shop/pi0-candy/ outputs/pi0-candy/ --profile nebius
 
-Serving needs ``HF_TOKEN`` for the gated ``google/paligemma-3b-pt-224`` repo,
-not just training: the saved preprocessor tokenizes the instruction with it.
+Serving pulls the CLIP vision and text encoders from the Hub on first run; they are
+ungated, so no token is needed (unlike the pi0 path, which required one for PaliGemma).
 """
 from __future__ import annotations
 
@@ -29,14 +28,13 @@ import logging
 import os
 import pathlib
 import time
-from typing import Any, Callable
+from typing import Callable
 
 import numpy as np
 import torch
 
 from livekit.portal import Observation, Operator, OperatorConfig, RpcError, RpcInvocationData, frame_bytes_to_numpy_rgb
 
-from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies import make_pre_post_processors
 from lerobot.policies.factory import get_policy_class
 from lerobot.policies.utils import prepare_observation_for_inference
@@ -49,7 +47,13 @@ from shared.rest_pose import ARM_POS_KEYS, RESET_POSE_DEFAULTS, SLIDER_VEL_KEY
 import cv2
 
 from operators.policy.settle import SettleGate
-from operators.policy.pi0 import ACTION_NAMES, STATE_NAMES, resolve_camera_map
+from operators.policy.dit import (
+    ACTION_NAMES,
+    POLICY_TYPE,
+    STATE_NAMES,
+    expected_image_hw,
+    resolve_camera_map,
+)
 
 IDENTITY = "policy-operator"
 CONFIG_PATH = pathlib.Path(__file__).resolve().parent.parent.parent / "portal.yaml"
@@ -70,43 +74,6 @@ logger = logging.getLogger(__name__)
 
 def _now_us() -> int:
     return int(time.time() * 1_000_000)
-
-
-def _expected_image_hw(policy_config: Any) -> dict[str, tuple[int, int]]:
-    """The (height, width) each image key was trained at, from the checkpoint.
-
-    Live cameras do not necessarily match the dataset: here the wrist streams 360x480
-    while every recorded frame is 480x640. pi0 tolerates that because its preprocessor
-    resizes each image on its own, but multi_task_dit stacks the camera views into one
-    tensor before any resizing (`_prepare_batch`), so mismatched sizes raise "stack
-    expects each tensor to be equal size". Feeding the trained resolution is also just
-    more faithful -- it removes a scale shift between training and serving for every
-    architecture.
-    """
-    features = getattr(policy_config, "input_features", None) or {}
-    shapes: dict[str, tuple[int, int]] = {}
-    for key, feature in features.items():
-        shape = getattr(feature, "shape", None)
-        if shape is not None and len(shape) == 3 and str(key).startswith("observation.images"):
-            shapes[key] = (int(shape[1]), int(shape[2]))
-    return shapes
-
-
-def _payload_task(data: RpcInvocationData, default: str) -> str:
-    """Parse an instruction from a bare string or ``{"task"|"instruction": ...}``."""
-    payload = (data.payload or "").strip()
-    if not payload:
-        return default
-    if payload.startswith("{"):
-        try:
-            obj = json.loads(payload)
-        except json.JSONDecodeError:
-            raise RpcError.Error(code=1400, message="payload was not valid JSON", data=None)
-        for key in ("task", "instruction", "prompt"):
-            if obj.get(key):
-                return str(obj[key])
-        raise RpcError.Error(code=1400, message="JSON payload had no task/instruction/prompt", data=None)
-    return payload
 
 
 class PolicyRunner:
@@ -190,29 +157,13 @@ class PolicyRunner:
 
     @torch.inference_mode()
     def _infer(self, state_vec: np.ndarray, images: dict[str, np.ndarray], task: str) -> torch.Tensor:
-        """One policy step, served from a locally held chunk of *absolute* actions.
+        """One policy step, served from a locally held chunk of absolute actions.
 
-        Chunking is ours rather than ``select_action``'s because of how relative
-        actions are undone. ``RelativeActionsProcessorStep`` caches the state it last
-        saw and the paired ``AbsoluteActionsProcessorStep`` adds that cache back, so
-        the pair is only correct when postprocessing happens against the same
-        observation that produced the prediction. Driving the policy's own queue would
-        call the preprocessor every tick while the model only ran every 50th::
-
-            tick 1  pre(obs@t1) caches t1 -> model runs -> chunk relative to t1
-                    post(action[0]) adds t1                          correct
-            tick 2  pre(obs@t2) caches t2 -> queue pops action[1]
-                    post(action[1]) adds t2                          wrong, wants t1
-
-        Every action after the first would be referenced to the wrong pose, silently:
-        nothing raises, the arm just tracks a distorted trajectory. Predicting and
-        postprocessing the whole chunk while the cache still holds the right state
-        fixes it -- ``to_absolute_actions`` takes (B, T, action_dim) and broadcasts the
-        state across time for exactly this.
-
-        Absolute-action checkpoints are unaffected either way: their unnormalize is
-        elementwise and the absolute step is disabled, so per-chunk and per-action give
-        the same numbers.
+        DiT keeps observation deques (``n_obs_steps`` frames of history) that only
+        ``select_action`` fills, so ``predict_action_chunk`` cannot be called directly --
+        it raises "stack expects a non-empty TensorList" on a fresh policy. Drive it the
+        way it expects: the first call generates a chunk, the remaining ``n_action_steps``
+        calls dequeue from it without re-running the model.
         """
         if self._chunk:
             return self._chunk.popleft()
@@ -222,24 +173,10 @@ class PolicyRunner:
         observation = prepare_observation_for_inference(observation, self._device, task, robot_type="")
         observation = self._pre(observation)
 
-        horizon = getattr(self._policy.config, "n_action_steps", 1)
-        if getattr(self._policy, "_queues", None) is not None:
-            # multi_task_dit keeps observation deques (n_obs_steps frames of history) that
-            # only `select_action` fills, so calling predict_action_chunk on it raises
-            # "stack expects a non-empty TensorList". Drive it the way it expects: the
-            # first call generates the chunk, the rest dequeue without re-running the
-            # model. Relative actions are not a concern here -- it trains on absolute.
-            self._policy.reset()
-            for _ in range(horizon):
-                action = self._policy.select_action(dict(observation))
-                self._chunk.append(self._post(action).squeeze(0).cpu())
-            return self._chunk.popleft()
-
-        chunk = self._policy.predict_action_chunk(observation)
-        chunk = self._post(chunk)
-        # [1, T, action_dim] -> T tensors of [action_dim]. Only the first n_action_steps
-        # are executed; the model may predict a longer chunk_size than it commits to.
-        self._chunk.extend(chunk.squeeze(0)[:horizon].cpu())
+        self._policy.reset()
+        for _ in range(getattr(self._policy.config, "n_action_steps", 1)):
+            action = self._policy.select_action(dict(observation))
+            self._chunk.append(self._post(action).squeeze(0).cpu())
         return self._chunk.popleft()
 
     def _send_arm(self, slider_vel: float) -> None:
@@ -386,25 +323,19 @@ class PolicyRunner:
         return {"task": self._task, "reason": reason, "ticks": ticks, "elapsed_s": elapsed}
 
 
-def _policy_class(checkpoint: str):
-    """The policy class the checkpoint was saved as (``pi0`` or ``pi05``).
-
-    Dispatched off the checkpoint rather than hard-coded: the two are wire-compatible
-    here -- same camera slots, same 7-wide state, same chunking -- but pi0.5 must be
-    loaded by its own class or the state dict will not match.
-    """
-    config_path = pathlib.Path(checkpoint) / "config.json"
-    if config_path.is_file():
-        policy_type = json.loads(config_path.read_text()).get("type", "pi0")
-    else:  # a Hub repo id; let lerobot resolve it
-        policy_type = PreTrainedConfig.from_pretrained(checkpoint).type
-    return get_policy_class(policy_type)
-
-
 def _load_policy(checkpoint: str, device: str, num_steps: int):
     """Load the checkpoint, wire its normalizer, and build the processors."""
-    logger.info("[policy] loading %s (downloads the PaliGemma backbone on first run)...", checkpoint)
-    policy = _policy_class(checkpoint).from_pretrained(checkpoint)
+    config_path = pathlib.Path(checkpoint) / "config.json"
+    if config_path.is_file():
+        policy_type = json.loads(config_path.read_text()).get("type")
+        if policy_type != POLICY_TYPE:
+            raise RuntimeError(
+                f"{checkpoint} is a {policy_type!r} checkpoint; this operator serves "
+                f"{POLICY_TYPE!r} only. See operators/policy/RESULTS.md."
+            )
+
+    logger.info("[policy] loading %s (downloads the CLIP encoders on first run)...", checkpoint)
+    policy = get_policy_class(POLICY_TYPE).from_pretrained(checkpoint)
     policy.config.device = device
     if num_steps > 0:
         policy.config.num_inference_steps = num_steps
@@ -454,10 +385,9 @@ def build_runner(op: Operator, args: argparse.Namespace,
     # Off the preprocessor, not the policy config: the pipeline renames our camera
     # keys into pi0's openpi slots, so what we feed are the pre-rename names.
     camera_for_key = resolve_camera_map(
-        preprocessor,
+        policy.config,
         env_str("POLICY_PRIMARY_CAMERA", "overhead_camera"),
         env_str("POLICY_WRIST_CAMERA", "arm_camera"),
-        policy_config=policy.config,
     )
     logger.info("[policy] image mapping: %s", camera_for_key)
 
@@ -465,7 +395,7 @@ def build_runner(op: Operator, args: argparse.Namespace,
         op, fps=FPS, device=args.device, duration_s=args.duration,
         policy=policy, preprocessor=preprocessor, postprocessor=postprocessor,
         camera_for_key=camera_for_key,
-        image_hw=_expected_image_hw(policy.config),
+        image_hw=expected_image_hw(policy.config),
         settle_tolerance=args.settle_tolerance, settle_timeout_s=args.settle_timeout,
         start_ramp_s=args.start_ramp, start_tolerance=args.start_tolerance,
         on_tick=on_tick,
