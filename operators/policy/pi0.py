@@ -57,7 +57,25 @@ def _rename_sources(preprocessor: Any) -> list[str]:
     return []
 
 
-def resolve_camera_map(preprocessor: Any, primary: str, wrist: str) -> dict[str, str]:
+def _policy_image_keys(preprocessor: Any, policy_config: Any) -> list[str]:
+    """The image keys to feed, whether or not the checkpoint renames them.
+
+    pi0/pi0.5 rename the dataset's camera keys into openpi's slots at training time, so
+    the rename map is the authority there. multi_task_dit has no such indirection -- it
+    consumes ``observation.images.*`` as recorded -- so a DiT checkpoint carries no
+    rename step and the map is empty. Falling back to the config's image features covers
+    that case; for pi0 the fallback is not used, which matters because its
+    ``input_features`` lists a third openpi slot we never wire.
+    """
+    renamed = _rename_sources(preprocessor)
+    if renamed:
+        return renamed
+    features = getattr(policy_config, "image_features", None) or []
+    return [key for key in features if str(key).startswith(OBS_IMAGES)]
+
+
+def resolve_camera_map(preprocessor: Any, primary: str, wrist: str,
+                       policy_config: Any = None) -> dict[str, str]:
     """Map the keys the policy consumes onto physical camera names.
 
     Match on the name first, or a positional map would feed the wrist image in as
@@ -68,7 +86,7 @@ def resolve_camera_map(preprocessor: Any, primary: str, wrist: str) -> dict[str,
     physical = [primary, wrist]
     mapping: dict[str, str] = {}
     unmatched: list[str] = []
-    for key in _rename_sources(preprocessor):
+    for key in _policy_image_keys(preprocessor, policy_config):
         name = key.rsplit(".", 1)[-1]
         if name in physical:
             mapping[key] = name
@@ -77,8 +95,8 @@ def resolve_camera_map(preprocessor: Any, primary: str, wrist: str) -> dict[str,
 
     if not mapping and not unmatched:
         raise RuntimeError(
-            "checkpoint's preprocessor renames no image keys, so there is nothing to "
-            "feed the cameras into; was it trained with --rename_map?"
+            "checkpoint exposes no image keys, via a rename map or config.image_features, "
+            "so there is nothing to feed the cameras into"
         )
 
     spare = [name for name in physical if name not in mapping.values()]

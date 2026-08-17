@@ -425,6 +425,7 @@ def build_runner(op: Operator, args: argparse.Namespace,
         preprocessor,
         env_str("POLICY_PRIMARY_CAMERA", "overhead_camera"),
         env_str("POLICY_WRIST_CAMERA", "arm_camera"),
+        policy_config=policy.config,
     )
     logger.info("[policy] image mapping: %s", camera_for_key)
 
