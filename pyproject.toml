@@ -7,7 +7,12 @@ dependencies = [
     "livekit-portal>=0.2.4",
     "livekit-api>=0.7",
     "livekit>=1.1.8",
-    "lerobot[feetech,smolvla,dataset]==0.6.1",
+    # multi_task_dit is here rather than only in the training group because serving a
+    # DiT checkpoint needs its diffusers-backed scheduler at load time. Without it the
+    # policy operator dies with "'diffusers' is required but not installed" -- and
+    # get_policy_class("multi_task_dit") succeeds regardless, so the gap is not visible
+    # until a checkpoint is actually loaded.
+    "lerobot[feetech,dataset,multi_task_dit]==0.6.1",
     "lerobot_robot_so101_slider",
     "lerobot_teleoperator_so101_with_slider",
     "pynput>=1.7",          # teleoperator leader: arrow keys drive slider.vel
@@ -37,25 +42,28 @@ teleoperator-ui = "operators.teleoperator.ui.app:cli"
 # Training-only slice for operators/policy/skypilot.yaml: no serial/HID, camera or UI
 # deps, so a GPU box installs neither feetech nor imgui.
 train = [
-    "lerobot[smolvla,dataset]==0.6.1",
+    "lerobot[dataset]==0.6.1",
     "torch>=2.2",
     "torchvision",
     "numpy>=1.24",
     "python-dotenv>=1",
     "livekit-api>=0.7",   # train.py -> shared.common.load_env imports livekit.api
 ]
-# operators/policy/skypilot_pi0.yaml: pi0 is PaliGemma 2B + a 300M action expert and
-# needs the `pi` extra on top of the shared training stack.
-train-pi0 = [
+# operators/policy/skypilot_dit.yaml: multi_task_dit pulls CLIP vision+text encoders
+# through transformers, which the base training stack does not bring in.
+train-dit = [
     { include-group = "train" },
-    "lerobot[pi]==0.6.1",
+    "lerobot[multi_task_dit]==0.6.1",
 ]
 # operators/reward/skypilot.yaml: SARM's encoding processor imports faker (and the
 # rest of the sarm extra) at construction, so reward training needs it on top of
-# the shared training stack.
+# the shared training stack. matplotlib is not part of that extra but sits at the top
+# of lerobot's compute_rabc_weights as an unconditional import, so scoring a dataset
+# for RABC (operators/policy/skypilot_pi05.yaml) dies without it.
 train-reward = [
     { include-group = "train" },
     "lerobot[sarm]==0.6.1",
+    "matplotlib",
 ]
 
 [[tool.uv.index]]

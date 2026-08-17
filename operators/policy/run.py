@@ -1,10 +1,13 @@
-"""Picker operator: serve pi0 (six-DOF arm) over the ``run_policy`` RPC.
+"""Picker operator: serve multi_task_dit (six-DOF arm) over the ``run_policy`` RPC.
 
-The checkpoint is required — there is no servable stock pi0, so fine-tune one
-first (see ``skypilot_pi0.yaml``)::
+DiT-only by choice, not by accident: on the arm, every pi0.5 variant picked the wrong
+candy and both DiT arms picked the right one, so the multi-architecture serving path was
+removed rather than left to rot. See operators/policy/RESULTS.md for the comparison, and
+git history for the pi0/pi0.5/SmolVLA paths if they are ever wanted back.
 
-    uv run policy --checkpoint outputs/pi0-candy/checkpoints/005000/pretrained_model
-    uv run policy --checkpoint <user>/pi0-candy       # or a Hub repo id
+Fine-tune one first (``skypilot_dit.yaml``); there is no servable stock checkpoint::
+
+    uv run policy --checkpoint outputs/dit-orig/checkpoints/007500/pretrained_model
 
 Checkpoints live in the bucket rather than beside the code, and lerobot's
 ``last`` symlink is never written (object storage has no symlinks — see
@@ -12,13 +15,14 @@ Checkpoints live in the bucket rather than beside the code, and lerobot's
 
     aws s3 sync s3://candy-shop/pi0-candy/ outputs/pi0-candy/ --profile nebius
 
-Serving needs ``HF_TOKEN`` for the gated ``google/paligemma-3b-pt-224`` repo,
-not just training: the saved preprocessor tokenizes the instruction with it.
+Serving pulls the CLIP vision and text encoders from the Hub on first run; they are
+ungated, so no token is needed (unlike the pi0 path, which required one for PaliGemma).
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import deque
 import json
 import logging
 import os
@@ -31,8 +35,8 @@ import torch
 
 from livekit.portal import Observation, Operator, OperatorConfig, RpcError, RpcInvocationData, frame_bytes_to_numpy_rgb
 
-from lerobot.policies.pi0.modeling_pi0 import PI0Policy
 from lerobot.policies import make_pre_post_processors
+from lerobot.policies.factory import get_policy_class
 from lerobot.policies.utils import prepare_observation_for_inference
 from lerobot.utils.constants import OBS_STATE
 
@@ -40,8 +44,16 @@ from shared.common import env_str, load_env, mint_token, pace, required_env
 from shared.config import FPS
 from shared.rest_pose import ARM_POS_KEYS, RESET_POSE_DEFAULTS, SLIDER_VEL_KEY
 
+import cv2
+
 from operators.policy.settle import SettleGate
-from operators.policy.pi0 import ACTION_NAMES, STATE_NAMES, resolve_camera_map
+from operators.policy.dit import (
+    ACTION_NAMES,
+    POLICY_TYPE,
+    STATE_NAMES,
+    expected_image_hw,
+    resolve_camera_map,
+)
 
 IDENTITY = "policy-operator"
 CONFIG_PATH = pathlib.Path(__file__).resolve().parent.parent.parent / "portal.yaml"
@@ -64,28 +76,12 @@ def _now_us() -> int:
     return int(time.time() * 1_000_000)
 
 
-def _payload_task(data: RpcInvocationData, default: str) -> str:
-    """Parse an instruction from a bare string or ``{"task"|"instruction": ...}``."""
-    payload = (data.payload or "").strip()
-    if not payload:
-        return default
-    if payload.startswith("{"):
-        try:
-            obj = json.loads(payload)
-        except json.JSONDecodeError:
-            raise RpcError.Error(code=1400, message="payload was not valid JSON", data=None)
-        for key in ("task", "instruction", "prompt"):
-            if obj.get(key):
-                return str(obj[key])
-        raise RpcError.Error(code=1400, message="JSON payload had no task/instruction/prompt", data=None)
-    return payload
-
-
 class PolicyRunner:
     """Owns the policy + the operator's action stream."""
 
     def __init__(self, op: Operator, *, fps: int, device: str, duration_s: float,
                  policy, preprocessor, postprocessor, camera_for_key: dict[str, str],
+                 image_hw: dict[str, tuple[int, int]] | None = None,
                  settle_tolerance: float, settle_timeout_s: float,
                  start_ramp_s: float = 2.0, start_tolerance: float = 3.0,
                  on_tick: Callable[[dict], None] | None = None) -> None:
@@ -97,10 +93,13 @@ class PolicyRunner:
         self._pre = preprocessor
         self._post = postprocessor
         self._camera_for_key = camera_for_key  # policy image key -> physical camera name
+        self._image_hw = image_hw or {}  # policy image key -> (h, w) it was trained at
         self._settle = SettleGate(
             keys=ARM_POS_KEYS, tolerance=settle_tolerance, timeout_s=settle_timeout_s
         )
         self._state: dict[str, float] = {}
+        # Absolute actions awaiting execution; see _infer for why chunking lives here.
+        self._chunk: deque = deque()
         self._obs_ts_us = 0
         self._frames: dict[str, np.ndarray] = {}
         self._start_ramp_s = start_ramp_s
@@ -142,27 +141,43 @@ class PolicyRunner:
         self._stop.set()
 
     def _replan_pending(self) -> bool:
-        """True when the next ``select_action`` runs the model instead of popping.
+        """True when the next tick runs the model instead of popping.
 
-        pi0 buffers an ``n_action_steps`` chunk (50, ~1.7 s at 30 fps) and only
-        replans once it drains (empty also before the first plan).
-
-        Read ``_action_queue``, not the ``_queues[ACTION]`` SmolVLA used: pi0's
-        ``reset`` builds both but ``select_action`` only ever fills the former, so
-        ``_queues`` stays empty forever and would gate every tick as a replan.
+        Reads our own queue rather than the policy's: we drive chunking here (see
+        :meth:`_infer`), so ``policy._action_queue`` is never filled at all.
         """
-        return not getattr(self._policy, "_action_queue", None)
+        return not self._chunk
+
+    def _resize_for(self, key: str, frame: np.ndarray) -> np.ndarray:
+        """Scale a live frame to the resolution this key was recorded at."""
+        target = self._image_hw.get(key)
+        if target is None or frame.shape[:2] == target:
+            return frame
+        return cv2.resize(frame, (target[1], target[0]), interpolation=cv2.INTER_AREA)
 
     @torch.inference_mode()
     def _infer(self, state_vec: np.ndarray, images: dict[str, np.ndarray], task: str) -> torch.Tensor:
-        """One policy step: raw obs -> pre -> select_action -> post. Returns [action_dim]."""
+        """One policy step, served from a locally held chunk of absolute actions.
+
+        DiT keeps observation deques (``n_obs_steps`` frames of history) that only
+        ``select_action`` fills, so ``predict_action_chunk`` cannot be called directly --
+        it raises "stack expects a non-empty TensorList" on a fresh policy. Drive it the
+        way it expects: the first call generates a chunk, the remaining ``n_action_steps``
+        calls dequeue from it without re-running the model.
+        """
+        if self._chunk:
+            return self._chunk.popleft()
+
         observation: dict[str, object] = {OBS_STATE: state_vec}
         observation.update(images)
         observation = prepare_observation_for_inference(observation, self._device, task, robot_type="")
         observation = self._pre(observation)
-        action = self._policy.select_action(observation)
-        action = self._post(action)
-        return action.squeeze(0).cpu()
+
+        self._policy.reset()
+        for _ in range(getattr(self._policy.config, "n_action_steps", 1)):
+            action = self._policy.select_action(dict(observation))
+            self._chunk.append(self._post(action).squeeze(0).cpu())
+        return self._chunk.popleft()
 
     def _send_arm(self, slider_vel: float) -> None:
         """Hold the current arm pose, sending the given slider velocity."""
@@ -262,6 +277,7 @@ class PolicyRunner:
                     self._policy.reset()
                     self._pre.reset()
                     self._post.reset()
+                    self._chunk.clear()
                     if not await self._goto_start():
                         reason = "stopped"
                         break
@@ -280,7 +296,8 @@ class PolicyRunner:
                 # rather than requiring it — `ready` gates on the arm keys only, and 0
                 # is what the column held for nearly every frame pi0 trained on.
                 state_vec = np.array([self._state.get(key, 0.0) for key in STATE_NAMES], dtype=np.float32)
-                images = {key: self._frames[cam] for key, cam in self._camera_for_key.items()}
+                images = {key: self._resize_for(key, self._frames[cam])
+                          for key, cam in self._camera_for_key.items()}
 
                 # Inference is heavy and synchronous; run it off the event loop so
                 # Portal keeps delivering fresh observations between ticks.
@@ -308,8 +325,17 @@ class PolicyRunner:
 
 def _load_policy(checkpoint: str, device: str, num_steps: int):
     """Load the checkpoint, wire its normalizer, and build the processors."""
-    logger.info("[policy] loading %s (downloads the PaliGemma backbone on first run)...", checkpoint)
-    policy = PI0Policy.from_pretrained(checkpoint)
+    config_path = pathlib.Path(checkpoint) / "config.json"
+    if config_path.is_file():
+        policy_type = json.loads(config_path.read_text()).get("type")
+        if policy_type != POLICY_TYPE:
+            raise RuntimeError(
+                f"{checkpoint} is a {policy_type!r} checkpoint; this operator serves "
+                f"{POLICY_TYPE!r} only. See operators/policy/RESULTS.md."
+            )
+
+    logger.info("[policy] loading %s (downloads the CLIP encoders on first run)...", checkpoint)
+    policy = get_policy_class(POLICY_TYPE).from_pretrained(checkpoint)
     policy.config.device = device
     if num_steps > 0:
         policy.config.num_inference_steps = num_steps
@@ -359,7 +385,7 @@ def build_runner(op: Operator, args: argparse.Namespace,
     # Off the preprocessor, not the policy config: the pipeline renames our camera
     # keys into pi0's openpi slots, so what we feed are the pre-rename names.
     camera_for_key = resolve_camera_map(
-        preprocessor,
+        policy.config,
         env_str("POLICY_PRIMARY_CAMERA", "overhead_camera"),
         env_str("POLICY_WRIST_CAMERA", "arm_camera"),
     )
@@ -369,6 +395,7 @@ def build_runner(op: Operator, args: argparse.Namespace,
         op, fps=FPS, device=args.device, duration_s=args.duration,
         policy=policy, preprocessor=preprocessor, postprocessor=postprocessor,
         camera_for_key=camera_for_key,
+        image_hw=expected_image_hw(policy.config),
         settle_tolerance=args.settle_tolerance, settle_timeout_s=args.settle_timeout,
         start_ramp_s=args.start_ramp, start_tolerance=args.start_tolerance,
         on_tick=on_tick,

@@ -48,3 +48,46 @@ def tolerate_missing_symlinks() -> None:
     # the call that actually crashes (lerobot_train.py:703). Rebind both.
     train_utils.update_last_checkpoint = tolerant
     lerobot_train.update_last_checkpoint = tolerant
+
+
+def require_pretrained_weights() -> None:
+    """Fail before training if ``--policy.path``'s weights cannot be fetched.
+
+    ``PI05Pytorch.from_pretrained`` (modeling_pi05.py:811, and pi0's at :846) wraps the
+    safetensors fetch in a bare ``except Exception`` that prints "Returning model without
+    loading pretrained weights" and returns the *randomly initialised* model. Training
+    then runs to completion at a normal step rate and exits 0, so a fine-tune that
+    silently became a from-scratch run is indistinguishable from a good one until you
+    evaluate it. That is exactly what happened here: Nebius cannot route to the AWS
+    ranges behind ``us.aws.cdn.hf.co``, the fetch failed, and 40 steps trained happily
+    from noise.
+
+    Resolving the same file up front turns that into a loud failure at startup. Only the
+    fetch is checked — if it succeeds here it is cached, so the load inside lerobot hits
+    the cache and cannot take the fallback.
+    """
+    import sys
+
+    argv = sys.argv[1:]
+    path = None
+    for i, token in enumerate(argv):
+        if token == "--policy.path" and i + 1 < len(argv):
+            path = argv[i + 1]
+        elif token.startswith("--policy.path="):
+            path = token.split("=", 1)[1]
+    if path is None:
+        return
+
+    from transformers.utils import cached_file
+
+    try:
+        cached_file(path, "model.safetensors")
+    except Exception as exc:
+        raise RuntimeError(
+            f"could not fetch model.safetensors for --policy.path={path!r}: {exc}. "
+            "Refusing to start: lerobot would swallow this and train from random "
+            "initialisation. Stage the weights into the bucket and point --policy.path "
+            "at the local copy."
+        ) from exc
+
+    logger.info("[patches] pretrained weights for %s resolved", path)
