@@ -42,6 +42,7 @@ from lerobot.utils.constants import OBS_STATE
 
 from shared.common import env_str, load_env, mint_token, pace, required_env
 from shared.config import FPS
+from shared.operators import POLICY
 from shared.rest_pose import ARM_POS_KEYS, RESET_POSE_DEFAULTS, SLIDER_VEL_KEY
 
 import cv2
@@ -55,7 +56,7 @@ from operators.policy.dit import (
     resolve_camera_map,
 )
 
-IDENTITY = "policy-operator"
+IDENTITY = POLICY
 CONFIG_PATH = pathlib.Path(__file__).resolve().parent.parent.parent / "portal.yaml"
 
 # Every pick starts by folding here, because that is where every recorded episode
@@ -74,6 +75,30 @@ logger = logging.getLogger(__name__)
 
 def _now_us() -> int:
     return int(time.time() * 1_000_000)
+
+
+def _payload_task(data: RpcInvocationData, default: str) -> str:
+    """Parse an instruction from a bare string or ``{"task"|"instruction"|"prompt": ...}``.
+
+    Same shape as the reward operator's parser, and the same reason it exists: the
+    callers are a voice agent, a browser console and the teleoperator, and they don't
+    agree on whether a one-field payload is worth an envelope. Lost with the pi0 paths in
+    a68e388, which left every ``run_policy`` raising NameError.
+    """
+    payload = (data.payload or "").strip()
+    if not payload:
+        return default
+    if payload.startswith("{"):
+        try:
+            obj = json.loads(payload)
+        except json.JSONDecodeError:
+            raise RpcError.Error(code=1400, message="payload was not valid JSON", data=None)
+        for key in ("task", "instruction", "prompt"):
+            if obj.get(key):
+                return str(obj[key])
+        raise RpcError.Error(
+            code=1400, message="JSON payload had no task/instruction/prompt", data=None)
+    return payload
 
 
 class PolicyRunner:
@@ -108,6 +133,7 @@ class PolicyRunner:
         self._reprime = False  # set by set_task: refold before planning the new one
         self._on_tick = on_tick  # per-tick telemetry for the debug driver
         self._stop = asyncio.Event()
+        self._busy = False  # a pick is in flight; see `pick`
         op.on_observation(self._on_observation)
 
     def _on_observation(self, obs: Observation) -> None:
@@ -234,7 +260,17 @@ class PolicyRunner:
         return True
 
     async def pick(self, task: str) -> dict:
-        """Run the policy until done/timeout/stop, holding the slider still."""
+        """Run the policy until done/timeout/stop, holding the slider still.
+
+        Refuses while a pick is already in flight, the way the reward operator's
+        ``run_task`` does: two picks would be two loops sending actions a tick apart on
+        the same arm. Reachable now that the reward operator is not the only caller —
+        the teleoperator's rail and the Playground console both drive this RPC directly.
+        """
+        if self._busy:
+            raise RpcError.Error(code=1409, message="policy operator already picking",
+                                 data=None)
+        self._busy = True
         self._task = task
         self._reprime = False  # the _goto_start below is the priming for this task
         self._stop.clear()
@@ -317,6 +353,7 @@ class PolicyRunner:
             if all(key in self._state for key in ARM_POS_KEYS):
                 self._send_arm(0.0)
             await self._op.set_active_operator(None)
+            self._busy = False
 
         elapsed = time.monotonic() - t0
         logger.info("[policy] pick done: reason=%s ticks=%d elapsed=%.2fs", reason, ticks, elapsed)

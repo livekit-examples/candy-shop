@@ -45,10 +45,32 @@ METHOD_STOP = "recorder_stop"
 METHOD_DISCARD = "recorder_discard"
 # {"task": str} -> {"task": str}. The default label stamped on new episodes.
 METHOD_SET_TASK = "recorder_set_task"
-# {} -> {"active": str|None}. Claim/release the robot's active-operator pointer;
-# the arm ignores this peer's actions until it holds it.
+# {} -> {"active": str, "suspended": [str]}. Take the arm: preempt every peer
+# operator first (an operator whose loop is still alive would re-claim on its next
+# tick), remember what was preempted for METHOD_RESUME, then point the robot here.
 METHOD_CLAIM = "recorder_claim"
+# {} -> {"active": None}. Drop the pointer without restarting anything.
 METHOD_RELEASE = "recorder_release"
+# {} -> {"resumed": [str]}. Hand the arm back: re-issue the runs the claim
+# preempted, with their original payloads, and stop asserting the claim.
+METHOD_RESUME = "recorder_resume"
+
+# --- peer operators (the rest of the room) ------------------------------------
+# {"identity": str, "payload": str} -> {"identity": str}. Fire that operator's own
+# run RPC (`run_task`, `run_policy`, `move_to`) and watch it in the background: the
+# call outlives this reply by design — `run_policy` returns only when preempted —
+# so progress shows up in `peers`, never in the reply.
+METHOD_PEER_RUN = "recorder_peer_run"
+# {"identity": str} -> {"identity": str}. That operator's stop RPC.
+# {} (no identity) -> stop every declared peer, orchestrators first, then fold the
+# arm with the robot's own reset. The panic path.
+METHOD_PEER_STOP = "recorder_peer_stop"
+
+# --- the leader arm -----------------------------------------------------------
+# {"enabled": bool} -> {"mimic": {...}}. Drive the leader arm from the follower's
+# observed pose, so the human feels what the policy is doing and can take the arm
+# from a matched pose instead of snapping it. Refused until the leader is open.
+METHOD_MIMIC = "recorder_mimic"
 
 # --- corpus mutation (scheduled as a job) -------------------------------------
 # {"episodes": {"<index>": "new task", ...}} -> {"job": "relabel"}
@@ -83,4 +105,32 @@ STATUS_KEYS = (
     "cameras",         # track names, in contract order
     "robot",           # the robot's identity, or None if it hasn't joined
     "active_operator", # who the robot currently obeys, or None
+    "claiming",        # this teleoperator is holding (and re-asserting) the arm
+    "peers",           # peer operators; see PEER_KEYS
+    "suspended",       # identities a claim preempted, waiting on METHOD_RESUME
+    "mimic",           # the mimic toggle's own state; see MIMIC_KEYS
+)
+
+# One entry per peer operator the room can offer: everything `shared.operators`
+# declares, plus any live operator it doesn't (which has no RPCs to drive, so the UI
+# shows it as presence only). The descriptors themselves are not on the wire — both
+# processes import `shared.operators` — so this carries only what changes.
+PEER_KEYS = (
+    "identity",
+    "online",          # in the room right now
+    "declared",        # `shared.operators` knows how to drive it
+    "active",          # the robot is obeying this one
+    "running",         # a run RPC we issued is still open
+    "payload",         # what we last asked it to do
+    "error",           # why its last run failed; "" if it didn't
+    "result",          # one-line summary of its last completed run
+    "elapsed_s",       # how long the open run has been going
+)
+
+MIMIC_KEYS = (
+    "enabled",         # the toggle
+    "state",           # off | waiting | aligning | tracking | error
+    "detail",          # why it is waiting, or what went wrong
+    "error_deg",       # worst joint gap between the leader and the follower
+    "intervene_deg",   # gap at which a push takes the arm; 0 = disabled
 )

@@ -1,10 +1,16 @@
 """Teleoperator: fly the leslider from an SO-101 leader arm and record it.
 
+Also the room's control desk: it discovers the other operators (move-to, policy,
+reward), drives them over their own RPCs, preempts them to take the arm, and hands it
+back — see ``peers``. ``mimic`` drives the *leader* from the follower's pose while one of
+them has the arm, so a takeover mid-policy is a handover rather than a jump.
+
 The review UI (``teleoperator-ui``) is a separate process driving this one over
 ``protocol``'s RPCs, so its repaints/crashes can't stall a recording. Run:
 ``uv run teleoperator`` (spawns the UI child; ``--no-ui`` records headless).
 
-Terminal hotkeys: c=cycle active operator, r=record, [=discard, t=set task, x=quit.
+Terminal hotkeys: c=claim/release the arm, m=mimic, r=record, [=discard, t=set task,
+x=quit.
 """
 from __future__ import annotations
 
@@ -42,6 +48,8 @@ from operators.teleoperator import library, protocol, session, shortcuts
 from operators.teleoperator.common import (
     camera_names, env, load_env, mint_token, pace, portal_config_path,
 )
+from operators.teleoperator.mimic import MimicController
+from operators.teleoperator.peers import PeerControl
 from operators.teleoperator.recorder import Recorder
 
 logger = logging.getLogger(__name__)
@@ -398,17 +406,6 @@ class Runtime:
 
 # --- main -------------------------------------------------------------------
 
-async def cycle_operator(op: Operator, me: str | None) -> None:
-    ring = [me, *op.operators()]
-    try:
-        idx = ring.index(op.active_operator())
-    except ValueError:
-        idx = -1  # active operator left the ring, or was never set — snap to self
-    nxt = ring[(idx + 1) % len(ring)]
-    await op.set_active_operator(nxt)
-    print(f"[teleoperator] active operator → {nxt}")
-
-
 async def main(*, with_ui: Optional[bool] = None) -> None:
     load_env(PACKAGE_DIR)
     url = env("LIVEKIT_URL", required=True)
@@ -427,6 +424,15 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
 
     op = Operator(cfg)
     rt = Runtime()
+    control = PeerControl(op)
+    mimic = MimicController(
+        fps=fps,
+        align_s=float(env("TELEOP_MIMIC_ALIGN_S", "1.5")),
+        intervene_deg=float(env("TELEOP_MIMIC_INTERVENE_DEG", "10")),
+        intervene_gripper=float(env("TELEOP_MIMIC_INTERVENE_GRIPPER", "20")),
+        intervene_hold_s=float(env("TELEOP_MIMIC_HOLD_S", "0.2")),
+        torque_limit=int(env("TELEOP_MIMIC_TORQUE_LIMIT", "500")),
+    )
 
     # The same rebindable bindings the window uses, so a foot pedal works in
     # either place. `t`/`x` are terminal-only and stay fixed. Built here, before
@@ -436,12 +442,18 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
     key_record = shortcuts.terminal_chars(keys, "record")
     key_discard = shortcuts.terminal_chars(keys, "discard")
     key_claim = shortcuts.terminal_chars(keys, "claim")
+    key_release = shortcuts.terminal_chars(keys, "release")
+    key_resume = shortcuts.terminal_chars(keys, "resume")
+    key_mimic = shortcuts.terminal_chars(keys, "mimic")
+    key_stop_all = shortcuts.terminal_chars(keys, "stop_all")
+    bound = (key_record | key_discard | key_claim | key_release | key_resume
+             | key_mimic | key_stop_all)
     # Bindings match before t/x below, so a binding on either would shadow it
     # silently — warn rather than leave you wondering why `t` stopped working.
-    if clash := ({"t", "x"} & (key_record | key_discard | key_claim)):
-        print(f"[teleoperator] note: {sorted(clash)} is bound to a recording action, "
+    if clash := ({"t", "x"} & bound):
+        print(f"[teleoperator] note: {sorted(clash)} is bound to a session action, "
               f"so it no longer sets the task / quits in this terminal")
-    hotkeys = Hotkeys({"t", "x"} | key_record | key_discard | key_claim)
+    hotkeys = Hotkeys({"t", "x"} | bound)
 
     def build_recorder(repo_id: str, root, task: str) -> Recorder:
         return Recorder(
@@ -500,6 +512,63 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
     op.on_operator_joined(lambda i: print(f"[teleoperator] operator joined: {i}"))
     op.on_operator_left(lambda i: print(f"[teleoperator] operator left: {i}"))
 
+    # --- taking and giving back the arm --------------------------------------
+    # Shared by the RPC surface and the terminal hotkeys, so the two can't drift on what
+    # a claim means.
+
+    def fire(coro, label: str) -> None:
+        """Run a control action alongside the tick instead of inside it.
+
+        Every one of these waits on other peers' RPCs — a claim stops three operators
+        before it returns — and awaiting that in the tick would stop the leader's action
+        stream for as long as the slowest of them takes to answer.
+        """
+        asyncio.create_task(coro, name=label)
+
+    async def take_arm(reason: str, *, free_leader: bool) -> list[str]:
+        """Claim the arm: hand the leader over, preempt every peer, hold the pointer.
+
+        `free_leader` drops the leader's torque, which is only safe when a hand is
+        already on it — see `mimic`. Everything else holds the leader at its pose, which
+        parks the robot there until the human is ready.
+        """
+        mimic.handover(rt.leader, free=free_leader)
+        suspended = await control.claim(op.local_identity())
+        print(f"[teleoperator] arm claimed ({reason})"
+              + (f"; suspended {', '.join(suspended)} — resume restarts it"
+                 if suspended else ""))
+        return suspended
+
+    async def release_arm(reason: str) -> None:
+        await control.release()
+        print(f"[teleoperator] arm released ({reason})")
+
+    async def resume_arm(reason: str) -> list[str]:
+        resumed = await control.resume()
+        print(f"[teleoperator] resumed {', '.join(resumed) or 'nothing'} ({reason})")
+        return resumed
+
+    async def stop_everything(reason: str) -> tuple[list[str], Optional[str]]:
+        """The panic path: preempt every peer, then fold the arm.
+
+        In that order — the robot's reset self-claims, so an operator whose loop is still
+        alive would take the pointer straight back and carry on.
+        """
+        stopped = await control.stop_all(remember=False)
+        folded = await control.fold_arm()
+        print(f"[teleoperator] stop all ({reason}): {', '.join(stopped) or 'nothing'}"
+              f"{f'; fold failed: {folded}' if folded else '; arm folded'}")
+        return stopped, folded
+
+    def on_intervene(joint: str) -> None:
+        """The human pushed the mimicking leader: give them the arm.
+
+        The push *is* the hand on the leader, so this is the one takeover that may free
+        it outright.
+        """
+        print(f"[teleoperator] leader pushed ({joint}) — taking the arm")
+        fire(take_arm(f"push on {joint}", free_leader=True), "intervene")
+
     # --- RPC surface (see protocol) -----------------------------------------
     # Handlers run on the asyncio loop, so each is O(1) or hands off.
     def reply(**fields: Any) -> str:
@@ -526,6 +595,10 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
             "fps": fps,
             "robot": op.robot_identity(),
             "active_operator": op.active_operator(),
+            "claiming": control.claiming,
+            "peers": control.snapshot(),
+            "suspended": control.suspended,
+            "mimic": mimic.snapshot(),
         }
         recorder, jobs = rt.recorder, rt.jobs
         if recorder is None or jobs is None:
@@ -668,15 +741,41 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
         return reply(task=task)
 
     async def rpc_claim(data: RpcInvocationData) -> str:
-        me = op.local_identity()
-        await op.set_active_operator(me)
-        print(f"[teleoperator] control claimed by '{data.caller_identity}' -> leader driving")
-        return reply(active=me)
+        suspended = await take_arm(f"claimed by '{data.caller_identity}'", free_leader=False)
+        return reply(active=op.local_identity(), suspended=suspended)
 
     async def rpc_release(data: RpcInvocationData) -> str:
-        await op.set_active_operator(None)
-        print(f"[teleoperator] control released by '{data.caller_identity}'")
+        await release_arm(f"by '{data.caller_identity}'")
         return reply(active=None)
+
+    async def rpc_resume(data: RpcInvocationData) -> str:
+        return reply(resumed=await resume_arm(f"by '{data.caller_identity}'"))
+
+    async def rpc_peer_run(data: RpcInvocationData) -> str:
+        body = payload(data)
+        identity = str(body.get("identity", "")).strip()
+        if refusal := control.run(identity, str(body.get("payload", "")).strip()):
+            return refuse(refusal)
+        return reply(identity=identity)
+
+    async def rpc_peer_stop(data: RpcInvocationData) -> str:
+        identity = str(payload(data).get("identity", "")).strip()
+        if identity:
+            if refusal := await control.stop(identity):
+                return refuse(refusal)
+            return reply(identity=identity)
+        stopped, folded = await stop_everything(f"by '{data.caller_identity}'")
+        if folded:
+            return refuse(folded)
+        return reply(stopped=stopped)
+
+    async def rpc_mimic(data: RpcInvocationData) -> str:
+        if rt.leader is None:
+            return refuse("the leader arm is not open yet")
+        mimic.set_enabled(bool(payload(data).get("enabled")), rt.leader)
+        print(f"[teleoperator] mimic {'on' if mimic.enabled else 'off'} "
+              f"(requested by '{data.caller_identity}')")
+        return reply(mimic=mimic.snapshot())
 
     async def rpc_relabel(data: RpcInvocationData) -> str:
         recorder, jobs = rt.recorder, rt.jobs
@@ -729,6 +828,10 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
         (protocol.METHOD_SET_TASK, rpc_set_task),
         (protocol.METHOD_CLAIM, rpc_claim),
         (protocol.METHOD_RELEASE, rpc_release),
+        (protocol.METHOD_RESUME, rpc_resume),
+        (protocol.METHOD_PEER_RUN, rpc_peer_run),
+        (protocol.METHOD_PEER_STOP, rpc_peer_stop),
+        (protocol.METHOD_MIMIC, rpc_mimic),
         (protocol.METHOD_RELABEL, rpc_relabel),
         (protocol.METHOD_DELETE, rpc_delete),
     ):
@@ -767,7 +870,8 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
               "machine) to choose a port and a dataset, or set SO101_LEADER_PORT "
               "plus DATASET_REPO_ID/DATASET_ROOT to skip this")
 
-    print(f"[teleoperator] hotkeys: {shortcuts.describe(keys, 'claim')}=cycle operator  "
+    print(f"[teleoperator] hotkeys: {shortcuts.describe(keys, 'claim')}=claim/release arm  "
+          f"{shortcuts.describe(keys, 'mimic')}=mimic  "
           f"{shortcuts.describe(keys, 'record')}=record  "
           f"{shortcuts.describe(keys, 'discard')}=discard  t=set task  x=quit")
     hotkeys.start()
@@ -794,7 +898,22 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
             recorder, jobs = rt.recorder, rt.jobs
             for key in hotkeys.pop():
                 if key in key_claim:
-                    await cycle_operator(op, me)
+                    # One key, both directions: holding the arm and pressing it again
+                    # gives it back, which is what `c` did before as a ring of one.
+                    fire(release_arm("hotkey") if control.claiming
+                         else take_arm("hotkey", free_leader=False), "claim-key")
+                elif key in key_release:
+                    fire(release_arm("hotkey"), "release-key")
+                elif key in key_resume:
+                    fire(resume_arm("hotkey"), "resume-key")
+                elif key in key_mimic:
+                    if rt.leader is None:
+                        print("[teleoperator] mimic needs the leader arm open")
+                    else:
+                        mimic.set_enabled(not mimic.enabled, rt.leader)
+                        print(f"[teleoperator] mimic {'on' if mimic.enabled else 'off'}")
+                elif key in key_stop_all:
+                    fire(stop_everything("hotkey"), "stop-all-key")
                 elif key == "x":
                     quit_requested = True
                 elif recorder is None or jobs is None:
@@ -836,12 +955,28 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
             if quit_requested:
                 break
 
+            # Hold the pointer against every operator that clears it on the way out.
+            control.reassert(me)
+
             # Always send once the arm is open (even during a job): the robot
             # gates on the active operator, so keeping the leader in sync makes
             # takeover instant. Only recording pauses during a rewrite.
             if rt.leader is not None:
-                op.send_action(rt.leader.get_action(),
-                               timestamp_us=int(time.time() * 1_000_000))
+                action = rt.leader.get_action()
+                op.send_action(action, timestamp_us=int(time.time() * 1_000_000))
+                # Push detection before the next goal is written, so the leader's
+                # position is judged against the goal that was actually in force.
+                mimic.check_push(action, on_intervene)
+                # Mimic only makes sense while somebody else drives: the leader can't
+                # be driven and be doing the driving at the same time.
+                #
+                # Off the raw state stream, not `latest_obs`: mimic wants joint positions
+                # as fresh as the wire has them, and an observation is a state that also
+                # found frames to pair with — it can be a tick or two behind, or absent
+                # entirely when the video runs ahead of the sync window.
+                robot_state = op.get_state()
+                mimic.update(rt.leader, robot_state.values if robot_state else None,
+                             allowed=not control.claiming)
 
             # Lazy-build the dataset once a frame reveals the resolution.
             if (recorder is not None and not recorder.is_ready
@@ -862,6 +997,9 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
     finally:
         hotkeys.stop()
         ui.stop()
+        # Before the bus closes: leaving the leader torqued would hold it stiff for
+        # whoever picks it up next.
+        mimic.free(rt.leader)
         rt.close()
         try:
             await op.disconnect()

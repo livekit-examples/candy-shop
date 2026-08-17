@@ -6,12 +6,15 @@ posts commands back, so closing or crashing it leaves recording untouched.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import pathlib
 import time
 from typing import Any, Optional
 
-from imgui_bundle import ImVec2, hello_imgui, imgui, immvision
+from imgui_bundle import ImVec2, ImVec4, hello_imgui, imgui, immvision
+
+from shared import operators as roster
 
 from operators.teleoperator import protocol, shortcuts
 from operators.teleoperator.common import (
@@ -25,11 +28,17 @@ from operators.teleoperator.ui.theme import font
 logger = logging.getLogger(__name__)
 
 PACKAGE_DIR = pathlib.Path(__file__).resolve().parents[1]
-SIDEBAR_WIDTH = 320.0
+SIDEBAR_WIDTH = 340.0
 LABEL_WIDTH = 104.0
 METRIC_LABEL_WIDTH = 152.0
 HEADER_WIDTH = 660.0
-METRICS_HEIGHT_FRACTION = 0.34
+# The bottom band is the control plane: who drives the arm, and the operators it can be
+# handed to. Full width — the two belong side by side, because taking the arm and
+# starting an operator are the same decision from opposite ends.
+BAND_HEIGHT_FRACTION = 0.36
+OPERATOR_CARD_HEIGHT = 232.0
+OPERATOR_CARD_MIN_WIDTH = 240.0
+ARM_PANEL_WIDTH = 330.0
 
 
 class AppState:
@@ -58,6 +67,8 @@ class AppState:
         self.viewing: Optional[int] = None    # episode the player should show
         self.last_frame_at = 0.0              # wall clock, for playback pacing
         self.keys = shortcuts.load()
+        # identity -> what's typed in that operator's card, before it is sent.
+        self.peer_drafts: dict[str, str] = {}
         self.binding: Optional[str] = None           # action awaiting a keypress
 
     def sync(self, status: dict[str, Any]) -> None:
@@ -83,15 +94,20 @@ def text(color, value: str) -> None:
     imgui.pop_style_color()
 
 
-def heading(label: str, action: str = "") -> bool:
+def heading(label: str, action: str = "", *, disabled: bool = False) -> bool:
     """Section label, optionally with a right-aligned button. Returns whether it was clicked."""
     width = imgui.get_content_region_avail().x
     with font(theme.FONTS.small):
         text(theme.FG4, label.upper())
     clicked = False
     if action:
-        imgui.same_line(max(width - 46.0, 0.0))
+        # Measured, not guessed: these labels carry a key hint that changes with the
+        # bindings, and a fixed offset clipped the long ones.
+        action_width = imgui.calc_text_size(action).x + imgui.get_style().frame_padding.x * 2
+        imgui.same_line(max(width - action_width, 0.0))
+        imgui.begin_disabled(disabled)
         clicked = imgui.small_button(action)
+        imgui.end_disabled()
     imgui.spacing()
     return clicked
 
@@ -160,10 +176,65 @@ def danger_button(label: str, size: ImVec2 = ImVec2(0, 0)) -> bool:
     return clicked
 
 
+BADGE_PAD = ImVec2(7.0, 2.0)
+
+
+def badge(label: str, fg, bg, *, dot: bool = False) -> None:
+    """A pill, drawn straight onto the draw list — ImGui has no chip widget. `dot`
+    breathes, the web app's cue for something live rather than merely true."""
+    with font(theme.FONTS.small):
+        size = imgui.calc_text_size(label)
+        height = size.y + BADGE_PAD.y * 2
+        width = size.x + BADGE_PAD.x * 2 + (11.0 if dot else 0.0)
+        pos = imgui.get_cursor_screen_pos()
+        draw = imgui.get_window_draw_list()
+        draw.add_rect_filled(pos, ImVec2(pos.x + width, pos.y + height),
+                             imgui.get_color_u32(bg), height / 2)
+        x = pos.x + BADGE_PAD.x
+        if dot:
+            # 0.45..1.0 at ~0.7 Hz: visible as motion, never a strobe.
+            alpha = 0.725 + 0.275 * math.sin(imgui.get_time() * 4.4)
+            draw.add_circle_filled(ImVec2(x + 3.0, pos.y + height / 2), 3.0,
+                                   imgui.get_color_u32(ImVec4(fg.x, fg.y, fg.z, alpha)))
+            x += 11.0
+        draw.add_text(ImVec2(x, pos.y + BADGE_PAD.y), imgui.get_color_u32(fg), label)
+        imgui.dummy(ImVec2(width, height))
+
+
+def chip_width(label: str) -> float:
+    """What `chip` will occupy, for laying a row of them out before drawing."""
+    style = imgui.get_style()
+    with font(theme.FONTS.small):
+        return imgui.calc_text_size(label).x + style.frame_padding.x + style.item_spacing.x
+
+
+def chip(label: str) -> bool:
+    """A preset: quiet, one step above the card it sits on."""
+    imgui.push_style_color(imgui.Col_.button, theme.BG3)
+    imgui.push_style_color(imgui.Col_.button_hovered, theme.BG_ACCENT2)
+    imgui.push_style_color(imgui.Col_.text, theme.FG2)
+    with font(theme.FONTS.small):
+        clicked = imgui.small_button(label)
+    imgui.pop_style_color(3)
+    return clicked
+
+
+def toggle_button(label: str, on: bool, size: ImVec2 = ImVec2(0, 0)) -> bool:
+    """A button that shows its own state: accent-on-dark while engaged."""
+    imgui.push_style_color(imgui.Col_.button, theme.BG_ACCENT2 if on else theme.BG3)
+    imgui.push_style_color(imgui.Col_.button_hovered,
+                           theme.BG_ACCENT2 if on else theme.BG3_HOVER)
+    imgui.push_style_color(imgui.Col_.text, theme.ACCENT1 if on else theme.FG2)
+    clicked = imgui.button(label, size)
+    imgui.pop_style_color(3)
+    return clicked
+
+
 # --- regions ----------------------------------------------------------------
 
 def draw_header(state: AppState) -> None:
     client, status = state.client, state.client.status
+    full_width = imgui.get_content_region_avail().x
 
     connection = client.connection
     if connection == "connected" and status:
@@ -184,6 +255,7 @@ def draw_header(state: AppState) -> None:
     columns = (
         ("teleoperator", link, link_colour),
         ("rate", rate if status else "--", theme.FG1 if status else theme.FG4),
+        ("driving", _driving_label(status), _driving_colour(status)),
     )
     # Stretch over a bounded width: `sizing_fixed_fit` collapses these cells (drawn
     # with same_line, so the table can't measure them) and full-window stretch parks
@@ -198,14 +270,66 @@ def draw_header(state: AppState) -> None:
     if status:
         with font(theme.FONTS.mono_small):
             text(theme.FG4, f"{status.get('repo_id', '?')}   {status.get('root', '?')}")
+        # What is worth noticing mid-flight, so the Metrics tab is somewhere you go to
+        # read *why* rather than to notice at all.
+        imgui.same_line()
+        _draw_link_chips(state)
 
-    # new_line() closes the row explicitly: a cursor left mid-line put the tab bar
+    # Measured from the header's own width, not what's left of the current row: the link
+    # chips leave the cursor mid-line, and `content_region_avail` there is the remainder.
+    # new_line() below closes the row explicitly — a cursor left mid-line put the tab bar
     # off the right edge where it drew nothing.
-    imgui.same_line(max(imgui.get_content_region_avail().x - 96.0, 0.0))
+    imgui.same_line(max(full_width - 96.0, 0.0))
     if imgui.button("settings"):
         imgui.open_popup("Settings")
     draw_settings(state)
     imgui.new_line()
+
+
+def _driving_label(status: dict[str, Any]) -> str:
+    if not status:
+        return "--"
+    active = status.get("active_operator")
+    if active is None:
+        return "nobody"
+    return "this leader" if active == status.get("identity") else active
+
+
+def _driving_colour(status: dict[str, Any]):
+    if not status or status.get("active_operator") is None:
+        return theme.FG4
+    return (theme.ACCENT1 if status.get("active_operator") == status.get("identity")
+            else theme.FG1)
+
+
+def _chip_bg(colour):
+    """The ground a status colour sits on: its own dark field for the two that mean
+    something, the plain card surface for everything else."""
+    if colour is theme.SERIOUS:
+        return theme.BG_SERIOUS
+    if colour is theme.ACCENT1:
+        return theme.BG_ACCENT
+    return theme.BG2
+
+
+def _draw_link_chips(state: AppState) -> None:
+    """The link's state as chips: round trip, what sync is waiting on, rows lost."""
+    metrics = state.client.metrics
+    status = state.client.status
+    rtt = (metrics.get("rtt_ms") or {}).get("last")
+    blocker = str((metrics.get("sync") or {}).get("blocker") or "")
+    dropped = int(status.get("dropped", 0) or 0)
+
+    if rtt is not None:
+        colour = _rtt_colour(rtt)
+        badge(f"rtt {rtt:g} ms", colour, _chip_bg(colour))
+        imgui.same_line()
+    if blocker:
+        badge(f"sync waiting on {blocker}", theme.MODERATE, _chip_bg(theme.MODERATE))
+        imgui.same_line()
+    if dropped:
+        badge(f"{dropped} dropped", theme.SERIOUS, _chip_bg(theme.SERIOUS))
+        imgui.same_line()
 
 
 def draw_banner(state: AppState) -> None:
@@ -289,29 +413,27 @@ def draw_session(state: AppState, size: ImVec2) -> None:
     client, status = state.client, state.client.status
     imgui.begin_child("##session", size, imgui.ChildFlags_.borders)
 
-    heading("session")
     busy = bool(status.get("busy"))
     ready = bool(status.get("ready"))
     recording = bool(status.get("recording"))
     saving = bool(status.get("saving"))
 
     # --- task ---
-    with font(theme.FONTS.small):
-        text(theme.FG4, "TASK FOR NEW EPISODES")
     if state.task_draft is None:
         state.task_draft = str(status.get("task", ""))
+    dirty = state.task_draft != str(status.get("task", ""))
+    # `set` rides the section label rather than taking a row of its own: Enter in the
+    # field does the same thing, so a full-width button was mostly padding.
+    apply_task = heading("task for new episodes", "set",
+                         disabled=not dirty or recording or busy)
     imgui.set_next_item_width(-1)
     imgui.begin_disabled(recording or busy)
     submitted, state.task_draft = imgui.input_text(
         "##task", state.task_draft, imgui.InputTextFlags_.enter_returns_true
     )
     imgui.end_disabled()
-    remote_task = str(status.get("task", ""))
-    dirty = state.task_draft != remote_task
-    imgui.begin_disabled(not dirty or recording or busy)
-    if imgui.button("Set task", ImVec2(-1, 0)) or submitted:
+    if (submitted or apply_task) and state.task_draft.strip():
         client.call(protocol.METHOD_SET_TASK, {"task": state.task_draft})
-    imgui.end_disabled()
     imgui.spacing()
     imgui.separator()
     imgui.spacing()
@@ -381,27 +503,323 @@ def draw_session(state: AppState, size: ImVec2) -> None:
     imgui.separator()
     imgui.spacing()
 
-    heading("arm control")
-    claim_key = _first_key(state, "claim")
-    active = status.get("active_operator")
-    holds = active is not None and active == status.get("identity")
+    imgui.end_child()
 
-    half = ImVec2((imgui.get_content_region_avail().x - imgui.get_style().item_spacing.x) / 2, 0)
-    imgui.begin_disabled(not status or holds)
-    if button_with_key("Claim arm", claim_key, half):
+
+def draw_arm(state: AppState, size: ImVec2) -> None:
+    """Who the robot is obeying, and the moves that change it: take it, give it back,
+    restart what taking it interrupted, and mirror it onto the leader.
+
+    Its own panel under the session, at a fixed height: these are the controls you reach
+    for while the rig is moving, so they must not be what scrolls out of view.
+    """
+    client, status = state.client, state.client.status
+    imgui.begin_child("##arm", size, imgui.ChildFlags_.borders)
+    active = status.get("active_operator")
+    me = status.get("identity")
+    claiming = bool(status.get("claiming"))
+    holds = claiming or (active is not None and active == me)
+    suspended = list(status.get("suspended") or [])
+    mimic = status.get("mimic") or {}
+
+    heading("arm control")
+    if not status:
+        text(theme.FG4, "waiting for the teleoperator ...")
+        imgui.end_child()
+        return
+    if active is None:
+        field("driving", "nobody", theme.FG4)
+    else:
+        field("driving", "this leader" if active == me else active,
+              theme.ACCENT1 if active == me else theme.FG1)
+    if claiming and active != me:
+        # The gap between claiming and holding: a preempted operator clears the pointer
+        # on its way out, and this teleoperator writes it straight back.
+        field("pointer", "re-claiming ...", theme.MODERATE)
+    imgui.spacing()
+
+    style = imgui.get_style()
+    half = ImVec2((imgui.get_content_region_avail().x - style.item_spacing.x) / 2, 0)
+    imgui.begin_disabled(holds)
+    if button_with_key("Take arm", _first_key(state, "claim"), half, "accent"):
         client.call(protocol.METHOD_CLAIM)
     imgui.end_disabled()
     if imgui.is_item_hovered(imgui.HoveredFlags_.allow_when_disabled):
-        imgui.set_tooltip("Point the robot at this teleoperator, so the leader arm drives it.")
+        imgui.set_tooltip("Stop every operator, then point the robot at this leader.\n"
+                          "With mimic on, the leader is held at the arm's pose — hold it\n"
+                          "and switch mimic off to fly.")
     imgui.same_line()
-    imgui.begin_disabled(not status or active is None)
-    if imgui.button("Release", half):
+    imgui.begin_disabled(active is None and not claiming)
+    if button_with_key("Release", _first_key(state, "release"), half):
         client.call(protocol.METHOD_RELEASE)
     imgui.end_disabled()
     if imgui.is_item_hovered(imgui.HoveredFlags_.allow_when_disabled):
-        imgui.set_tooltip("Clear the pointer — the arm ignores everyone until someone claims it.")
+        imgui.set_tooltip("Clear the pointer — the arm ignores everyone until someone "
+                          "claims it.\nRestarts nothing; that's Resume.")
 
+    imgui.begin_disabled(not suspended)
+    label = (f"Resume {', '.join(roster.title_for(i) for i in suspended)}"
+             if suspended else "Resume")
+    if button_with_key(label, _first_key(state, "resume"), ImVec2(-1, 0)):
+        client.call(protocol.METHOD_RESUME)
+    imgui.end_disabled()
+    if imgui.is_item_hovered(imgui.HoveredFlags_.allow_when_disabled):
+        imgui.set_tooltip("Hand the arm back: re-run whatever taking it interrupted,\n"
+                          "with the same prompt. Only runs started here can be resumed —\n"
+                          "the agent's own RPCs are invisible from this seat.")
+
+    imgui.spacing()
+    _draw_mimic(state, mimic)
     imgui.end_child()
+
+
+# What each mimic state means, and how loudly to say it.
+MIMIC_LABELS = {
+    "off": ("off", theme.FG4),
+    "waiting": ("waiting", theme.MODERATE),
+    "aligning": ("aligning", theme.ACCENT1),
+    "tracking": ("tracking", theme.ACCENT1),
+    "holding": ("holding", theme.MODERATE),
+    "error": ("error", theme.SERIOUS),
+}
+
+
+def _draw_mimic(state: AppState, mimic: dict[str, Any]) -> None:
+    """The mimic toggle: the leader mirrors the arm, and a push on it takes over."""
+    enabled = bool(mimic.get("enabled"))
+    mimic_state = str(mimic.get("state") or "off")
+
+    if toggle_button("Mimic  —  leader follows the arm", enabled, ImVec2(-1, 0)):
+        state.client.call(protocol.METHOD_MIMIC, {"enabled": not enabled})
+    if imgui.is_item_hovered():
+        imgui.set_tooltip("Drive the leader from the follower's pose while another "
+                          "operator has\nthe arm, so you feel the policy and can take "
+                          "over without a jump.\nPush the leader to take the arm.")
+
+    label, colour = MIMIC_LABELS.get(mimic_state, (mimic_state, theme.FG1))
+    with font(theme.FONTS.small):
+        text(theme.FG4, "STATE")
+    imgui.same_line(LABEL_WIDTH)
+    badge(label, colour, _chip_bg(colour), dot=mimic_state in ("aligning", "tracking"))
+    if mimic_state == "tracking":
+        # How close the leader is to the push that would take the arm: the one number
+        # worth watching while a policy runs.
+        gap = float(mimic.get("error_deg") or 0.0)
+        limit = float(mimic.get("intervene_deg") or 0.0)
+        imgui.same_line()
+        with font(theme.FONTS.mono_small):
+            text(theme.ACCENT1 if limit and gap > limit * 0.5 else theme.FG3,
+                 f"push {gap:.1f} / {limit:.0f} deg" if limit else f"push {gap:.1f} deg")
+
+    # Only where it says something to act on: while tracking, the number above is the
+    # whole story and a permanent hint would just be furniture.
+    if mimic_state != "tracking" and (detail := str(mimic.get("detail") or "")):
+        imgui.push_text_wrap_pos(0.0)
+        with font(theme.FONTS.small):
+            text(theme.SERIOUS if mimic_state == "error" else theme.FG4, detail)
+        imgui.pop_text_wrap_pos()
+
+
+def draw_operators(state: AppState, size: ImVec2) -> None:
+    """The rail: which operators are in the room, which one the robot is obeying, and a
+    form per operator that drives it over its own RPC.
+
+    Shaped after the Playground's own rail (`OperatorDiagnostics.tsx`) — same cards, same
+    badges, same commit-on-release slider — because it is the same set of operators and
+    the same four RPCs.
+    """
+    status = state.client.status
+    peers = list(status.get("peers") or [])
+
+    imgui.begin_child("##operators", size, imgui.ChildFlags_.borders)
+    # The rail's own panic button, where the Playground puts it: always on screen, and
+    # in the neutral palette rather than the serious one, because a permanently red bar
+    # under a diagnostics rail stops being read at all.
+    if heading(f"operators  ({sum(1 for p in peers if p.get('online'))} live)",
+               f"stop everything  {_first_key(state, 'stop_all')}".strip()):
+        state.client.call(protocol.METHOD_PEER_STOP)
+    if imgui.is_item_hovered():
+        imgui.set_tooltip("Preempt every operator, then fold the arm and stop the "
+                          "slider.\nMotion only — the voice agent's next step can drive "
+                          "it again.")
+    if not peers:
+        text(theme.FG4, "no operators in the room")
+        imgui.end_child()
+        return
+
+    avail = imgui.get_content_region_avail()
+    columns = max(1, min(len(peers), int(avail.x // OPERATOR_CARD_MIN_WIDTH)))
+    # Cell padding trimmed from the style's 10x7: the cards carry their own padding, and
+    # the default put one row of them just past the panel's height.
+    imgui.push_style_var(imgui.StyleVar_.cell_padding, ImVec2(6.0, 4.0))
+    if imgui.begin_table("##rail", columns, imgui.TableFlags_.sizing_stretch_same):
+        for peer in peers:
+            imgui.table_next_column()
+            _draw_operator_card(state, peer)
+        imgui.end_table()
+    imgui.pop_style_var()
+    imgui.end_child()
+
+
+def _draw_operator_card(state: AppState, peer: dict[str, Any]) -> None:
+    identity = str(peer.get("identity", ""))
+    spec = roster.BY_IDENTITY.get(identity)
+    online = bool(peer.get("online"))
+    active = bool(peer.get("active"))
+    running = bool(peer.get("running"))
+    error = str(peer.get("error") or "")
+
+    imgui.push_id(identity)
+    # A card is one step above the rail it sits on, and the active one wears the accent
+    # border rather than a different fill — a colour swap would make the row jump.
+    imgui.push_style_color(imgui.Col_.child_bg, theme.BG2)
+    imgui.push_style_color(imgui.Col_.border,
+                           theme.ACCENT2 if active else theme.SEPARATOR1)
+    imgui.begin_child(f"##card_{identity}", ImVec2(0, OPERATOR_CARD_HEIGHT),
+                      imgui.ChildFlags_.borders, imgui.WindowFlags_.no_scrollbar)
+    card_width = imgui.get_content_region_avail().x
+
+    with font(theme.FONTS.body):
+        text(theme.FG0 if online else theme.FG3, roster.title_for(identity))
+    label, colour, dot = _peer_badge(online, running, active, error)
+    imgui.same_line(max(card_width - badge_width(label, dot=dot), 0.0))
+    badge(label, colour, _chip_bg(colour), dot=dot)
+    with font(theme.FONTS.mono_small):
+        text(theme.FG4, identity)
+
+    # One line of history, clipped by the card rather than wrapped: the whole reason
+    # ran to the recorder's log, and a card that grows would break the row.
+    with font(theme.FONTS.small):
+        if spec is None:
+            text(theme.FG4, "no descriptor — presence only")
+        elif running:
+            text(theme.ACCENT1, f"{float(peer.get('elapsed_s') or 0.0):.0f}s  "
+                                f"{peer.get('payload') or ''}")
+        elif error:
+            text(theme.SERIOUS, error)
+        elif result := str(peer.get("result") or ""):
+            text(theme.FG4, result)
+        else:
+            text(theme.FG4, "not run from here")
+
+    if spec is None:
+        _end_card()
+        return
+
+    imgui.spacing()
+    _draw_operator_form(state, spec, peer)
+    _end_card()
+
+
+def badge_width(label: str, *, dot: bool) -> float:
+    """Measured in the badge's own face, so right-aligning one lands where it draws."""
+    with font(theme.FONTS.small):
+        return imgui.calc_text_size(label).x + BADGE_PAD.x * 2 + (11.0 if dot else 0.0)
+
+
+def _end_card() -> None:
+    imgui.end_child()
+    imgui.pop_style_color(2)
+    imgui.pop_id()
+
+
+def _peer_badge(online: bool, running: bool, active: bool,
+                error: str) -> tuple[str, Any, bool]:
+    """(label, colour, pulse). Live states pulse; the rest are stated flatly."""
+    if not online:
+        return ("offline", theme.FG4, False)
+    if running:
+        return ("running", theme.ACCENT1, True)
+    if active:
+        return ("active", theme.ACCENT1, True)
+    if error:
+        return ("error", theme.SERIOUS, False)
+    return ("idle", theme.FG3, False)
+
+
+def _draw_operator_form(state: AppState, spec: roster.OperatorSpec,
+                        peer: dict[str, Any]) -> None:
+    """The one argument, its presets, and the two RPCs. Enter or a preset sends."""
+    client = state.client
+    identity = spec.identity
+    online = bool(peer.get("online"))
+    running = bool(peer.get("running"))
+    argument = spec.argument
+
+    def run(value: str) -> None:
+        client.call(protocol.METHOD_PEER_RUN, {"identity": identity, "payload": value})
+
+    draft = state.peer_drafts.get(identity)
+    if draft is None:
+        draft = argument.default if argument else ""
+        state.peer_drafts[identity] = draft
+
+    if argument is not None and argument.kind == "number":
+        imgui.set_next_item_width(-1)
+        imgui.begin_disabled(not online or running)
+        _, value = imgui.slider_float(
+            "##arg", _as_float(draft, argument.minimum), argument.minimum,
+            argument.maximum, "%.0f")
+        state.peer_drafts[identity] = f"{value:.0f}"
+        # Commit on release, not on every frame of the drag: one RPC per gesture, and
+        # the arm isn't asked to chase the cursor.
+        if imgui.is_item_deactivated_after_edit():
+            run(state.peer_drafts[identity])
+        imgui.end_disabled()
+    elif argument is not None:
+        imgui.set_next_item_width(-1)
+        imgui.begin_disabled(not online or running)
+        submitted, draft = imgui.input_text(
+            "##arg", draft, imgui.InputTextFlags_.enter_returns_true)
+        imgui.end_disabled()
+        state.peer_drafts[identity] = draft
+        if submitted and draft.strip():
+            run(draft.strip())
+
+    if argument is not None and argument.presets:
+        imgui.begin_disabled(not online or running)
+        right = imgui.get_cursor_pos_x() + imgui.get_content_region_avail().x
+        for index, (label, value) in enumerate(argument.presets):
+            if index:
+                # Wrap by hand: ImGui has no flow layout, and a row of chips that runs
+                # off a 270 px card is how the last preset became unreachable.
+                imgui.same_line()
+                if (imgui.get_cursor_pos_x() + chip_width(label)) > right:
+                    imgui.new_line()
+            # A preset is a command, not a suggestion: clicking one sends it.
+            if chip(label):
+                state.peer_drafts[identity] = value
+                run(value)
+        imgui.end_disabled()
+
+    style = imgui.get_style()
+    # Buttons on the card's bottom edge, so a row of cards lines up whatever their forms
+    # did above. Measured from the child's own height rather than the constant, which
+    # ignores its border and padding.
+    imgui.set_cursor_pos_y(max(imgui.get_cursor_pos_y(),
+                               imgui.get_window_height() - imgui.get_frame_height()
+                               - style.window_padding.y))
+    half = ImVec2((imgui.get_content_region_avail().x - style.item_spacing.x) / 2, 0)
+    imgui.begin_disabled(not online or running)
+    if imgui.button("Run", half):
+        run(state.peer_drafts.get(identity, "").strip())
+    imgui.end_disabled()
+    if imgui.is_item_hovered(imgui.HoveredFlags_.allow_when_disabled):
+        imgui.set_tooltip(f"{spec.run_rpc} — {spec.summary}")
+    imgui.same_line()
+    imgui.begin_disabled(not online)
+    if imgui.button("Stop", half):
+        client.call(protocol.METHOD_PEER_STOP, {"identity": identity})
+    imgui.end_disabled()
+    if imgui.is_item_hovered(imgui.HoveredFlags_.allow_when_disabled):
+        imgui.set_tooltip(f"{spec.stop_rpc} — safe to send while idle.")
+
+
+def _as_float(value: str, fallback: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
 
 
 def metric(label: str, value: str, color=theme.FG1) -> None:
@@ -791,10 +1209,12 @@ def draw(state: AppState) -> None:
         return
 
     draw_view_switch(state)
-    if state.tab == "Teleop":
-        draw_teleop_tab(state)
-    else:
+    if state.tab == "Dataset":
         draw_dataset_tab(state)
+    elif state.tab == "Metrics":
+        draw_metrics_tab(state)
+    else:
+        draw_teleop_tab(state)
 
     handle_shortcuts(state)
 
@@ -929,7 +1349,7 @@ def _setup_target(state: AppState, datasets: list, defaults: dict) -> tuple[str,
 
 def draw_view_switch(state: AppState) -> None:
     """A segmented control, not ImGui's tab bar (which collapsed to a 2 px sliver under this style)."""
-    for name in ("Teleop", "Dataset"):
+    for name in ("Teleop", "Dataset", "Metrics"):
         selected = state.tab == name
         imgui.push_style_color(imgui.Col_.button,
                                theme.BG_ACCENT2 if selected else theme.BG2)
@@ -946,15 +1366,33 @@ def draw_view_switch(state: AppState) -> None:
 
 
 def draw_teleop_tab(state: AppState) -> None:
+    """Cameras and the session up top; the arm and its operators in a band below."""
     avail = imgui.get_content_region_avail()
     spacing = imgui.get_style().item_spacing
-    metrics_h = max(avail.y * METRICS_HEIGHT_FRACTION, 160.0)
-    top_h = avail.y - metrics_h - spacing.y
+    band_h = max(avail.y * BAND_HEIGHT_FRACTION, OPERATOR_CARD_HEIGHT + 74.0)
+    top_h = avail.y - band_h - spacing.y
+    sidebar_w = min(SIDEBAR_WIDTH, avail.x * 0.32)
+    arm_w = min(ARM_PANEL_WIDTH, avail.x * 0.3)
 
-    draw_cameras(state, ImVec2(avail.x - SIDEBAR_WIDTH - spacing.x, top_h))
+    draw_cameras(state, ImVec2(avail.x - sidebar_w - spacing.x, top_h))
     imgui.same_line()
-    draw_session(state, ImVec2(SIDEBAR_WIDTH, top_h))
-    draw_metrics(state, ImVec2(avail.x, metrics_h))
+    draw_session(state, ImVec2(sidebar_w, top_h))
+    draw_arm(state, ImVec2(arm_w, band_h))
+    imgui.same_line()
+    draw_operators(state, ImVec2(avail.x - arm_w - spacing.x, band_h))
+
+
+def draw_metrics_tab(state: AppState) -> None:
+    """Portal's counters, on their own tab.
+
+    They used to share the teleop tab, which cost the session panel the height it needed
+    for its own counters. What matters mid-flight is a link that has gone bad, and the
+    header's chips say that in four numbers — this is where you come to read why.
+    """
+    avail = imgui.get_content_region_avail()
+    # Bounded, not full-bleed: these are label/value pairs, and stretching the grid over
+    # 1500 px parks every value half a screen from its label.
+    draw_metrics(state, ImVec2(min(1080.0, avail.x), min(avail.y, 430.0)))
 
 
 def draw_dataset_tab(state: AppState) -> None:
@@ -1093,11 +1531,22 @@ def handle_shortcuts(state: AppState) -> None:
         if recording:
             state.client.call(protocol.METHOD_DISCARD)
     elif key_pressed(state, "claim"):
-        if status and status.get("active_operator") != status.get("identity"):
+        # One key, both directions, matching the recorder's terminal binding.
+        if status.get("claiming"):
+            state.client.call(protocol.METHOD_RELEASE)
+        elif status:
             state.client.call(protocol.METHOD_CLAIM)
     elif key_pressed(state, "release"):
-        if status and status.get("active_operator") is not None:
+        if status and (status.get("active_operator") is not None or status.get("claiming")):
             state.client.call(protocol.METHOD_RELEASE)
+    elif key_pressed(state, "resume"):
+        if status.get("suspended"):
+            state.client.call(protocol.METHOD_RESUME)
+    elif key_pressed(state, "mimic"):
+        enabled = bool((status.get("mimic") or {}).get("enabled"))
+        state.client.call(protocol.METHOD_MIMIC, {"enabled": not enabled})
+    elif key_pressed(state, "stop_all"):
+        state.client.call(protocol.METHOD_PEER_STOP)
 
 
 def cli() -> None:

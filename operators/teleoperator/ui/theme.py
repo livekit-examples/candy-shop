@@ -33,6 +33,10 @@ ACCENT_SECONDARY = rgb("#dc85ff")  # purple-300
 BG_ACCENT = rgb("#051518")  # cyan-900
 BG_ACCENT2 = rgb("#012a32")  # cyan-800
 
+# One step above BG3, for a hovered control. The web gets this from Tailwind's
+# hover shade; here it has to be a token because ImGui wants the value.
+BG3_HOVER = rgb("#2a2a2a")
+
 SEPARATOR1 = rgb("#202020")
 SEPARATOR2 = rgb("#30302f")
 SEPARATOR_SERIOUS = rgb("#421510")  # red-800
@@ -122,8 +126,11 @@ def apply_style() -> None:
     c = style.set_color_
     C = imgui.Col_
 
-    c(C.window_bg, BG1)
-    c(C.child_bg, BG2)
+    # Surfaces go lighter as they rise, never darker (the web app's rule): BG0 is the
+    # ground the panels sit on, BG1 is a panel, BG2 a card raised on one, BG3 a control
+    # raised on a card. A card painted darker than its panel reads as a hole.
+    c(C.window_bg, BG0)
+    c(C.child_bg, BG1)
     c(C.popup_bg, BG2)
     c(C.menu_bar_bg, BG1)
     c(C.border, SEPARATOR1)
@@ -137,12 +144,12 @@ def apply_style() -> None:
     # A step above the card, not black wells: pure black on a near-black card
     # reads as a hole and hid the checkbox until hovered.
     c(C.frame_bg, BG3)
-    c(C.frame_bg_hovered, rgb("#2a2a2a"))
+    c(C.frame_bg_hovered, BG3_HOVER)
     c(C.frame_bg_active, BG_ACCENT2)
 
     # Quiet; the accent is reserved for the primary action.
     c(C.button, BG3)
-    c(C.button_hovered, rgb("#2a2a2a"))
+    c(C.button_hovered, BG3_HOVER)
     c(C.button_active, SEPARATOR2)
 
     # Unthemed, tabs fall back to ImGui's blue and the labels vanish against the window.

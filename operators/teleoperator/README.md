@@ -5,6 +5,13 @@ a `LeRobotDataset`, with an imgui **review UI** for watching the cameras, drivin
 the session, and curating the corpus. The human-demonstration and HITL-correction
 half of the data pipeline; `policy` and `move_to` are the autonomous halves.
 
+It is also the room's **control desk**: it finds the other operators, runs them over
+their own RPCs, preempts them to take the arm, and hands the arm back — and `mimic`
+drives the leader from the follower's pose while one of them is driving, so taking over
+mid-pick is a handover instead of a jump. Recording is unaffected by any of it: rows
+come from the *executed* action stream, so an episode spans a policy run, your
+intervention, and the policy resuming, in one continuous trajectory.
+
 The six leader joints mirror to the follower's arm `.pos`; the leader's arrow keys
 drive `slider.vel` (raw ticks/s — velocity mode, see [`portal.yaml`](../../portal.yaml)).
 Recording is driven by the executed action stream (`action_subscription`), so it
@@ -38,16 +45,68 @@ Terminal (recorder must have focus) and the review window share the same
 |--------|----------------|------|
 | record toggle | `r` / space / `'` | `'` is what a common USB foot pedal sends |
 | discard episode | `[` / backspace | |
-| cycle operator | `c` | human ↔ policy handoff; claims/releases control |
+| take / release arm | `c` | one key both ways; taking it stops every operator first |
+| mimic toggle | `m` | only the leader moves, so it keeps a letter |
+| resume | *(unbound)* | restarts what taking the arm interrupted — it moves the rig |
+| stop everything | *(unbound)* | preempts every operator, then folds the arm |
 | set task | `t` (terminal only) | refused while recording |
 | quit | `x` (terminal only) | |
 
-Rebind in the window's Settings, or per-action via `TELEOPERATOR_KEYS_RECORD`,
-`TELEOPERATOR_KEYS_DISCARD`, `TELEOPERATOR_KEYS_CLAIM` (comma-separated imgui key
-names, e.g. `TELEOPERATOR_KEYS_RECORD=r,space,apostrophe`).
+Rebind in the window's Settings, or per-action via `TELEOPERATOR_KEYS_<ACTION>`
+(`RECORD`, `DISCARD`, `CLAIM`, `RELEASE`, `RESUME`, `MIMIC`, `STOP_ALL`) —
+comma-separated imgui key names, e.g. `TELEOPERATOR_KEYS_RECORD=r,space,apostrophe`.
+`resume` and `stop_all` ship unbound on purpose: a stray keystroke that restarts a
+policy or folds the arm is worse than a mouse trip to the window.
 
 Leader keys (its own pynput hook, work regardless of focus): ←/→ drive the
 slider, ↑/↓ trim cruise speed, Space stops the slider.
+
+## Driving the other operators
+
+The window's **operators** rail is one card per operator: everything
+[`shared/operators.py`](../../shared/operators.py) declares, plus any live peer it
+doesn't (presence only — an undeclared peer advertises no RPCs to drive). Each card
+carries that operator's one argument, its presets, and its two RPCs; a preset is a
+command, so clicking one sends it. Discovery is presence + Portal's operator list, so
+an operator that starts late simply appears.
+
+Two rules the rail encodes, both load-bearing:
+
+* **A stop travels orchestrators-first** (`reward` → `policy` → `move-to`). Preempting
+  the policy while the reward operator still holds its retry loop just starts attempt
+  two. The rail also refuses to drive `policy` directly while `reward` is driving it.
+* **Taking the arm outlives the RPCs it preempted.** Every operator clears the robot's
+  active-operator pointer in a `finally`, so an unwind landing after the claim would
+  drop the arm; the teleoperator therefore re-asserts the pointer while it holds it.
+
+**Take arm** stops everything, remembers what *it* had running, and points the robot
+here. **Resume** re-issues exactly those runs with their original payloads and stops
+asserting the claim; **Release** hands the pointer back without restarting anything.
+Runs the *voice agent* started are point-to-point RPCs this seat never sees, so they
+can be stopped but not resumed — the active operator is the only evidence they exist.
+
+## Mimic, and intervening mid-pick
+
+`Mimic` drives the leader's six joints from the follower's observed pose (torque on,
+`Goal_Position` each tick) for as long as somebody else has the arm. The leader tracks
+the pick, so the pose you would hand the robot on taking over is already the pose it is
+in — which is what makes a mid-policy takeover safe. Without it, claiming slews the arm
+to wherever the leader happens to be lying.
+
+**Push the leader to take the arm.** With torque on, forcing a joint opens a gap between
+where the leader is and where it was told to be; a gap past `TELEOP_MIMIC_INTERVENE_DEG`
+held for `TELEOP_MIMIC_HOLD_S` is read as a hand, and the teleoperator stops everything
+and claims. That path frees the leader outright, because the push *is* the proof a hand
+is on it.
+
+Every other way of taking the arm **holds** the leader instead: torque stays on and the
+goal stops following the robot, which parks the arm at that pose. That is deliberate —
+an SO-101 leader nobody is holding falls under gravity, and a claimed teleoperator sends
+the follower down with it. Hold the leader, then switch mimic off to fly.
+
+`TELEOP_MIMIC_TORQUE_LIMIT` (per mille) is how hard the leader holds itself: the default
+500 is enough to carry its own weight and still yield to a firm hand, so a push registers
+without a fight.
 
 ## Configuration
 
@@ -61,6 +120,11 @@ dataset to open immediately):
 | `SO101_LEADER_ID` | `so101_leader` | calibration id |
 | `TELEOP_CRUISE_VELOCITY` | `1500` | slider ticks/s while an arrow is held |
 | `TELEOP_MAX_VELOCITY` | `3000` | ceiling for the ↑-arrow speed trim |
+| `TELEOP_MIMIC_ALIGN_S` | `1.5` | worst-case ease onto the arm's pose when torque comes on |
+| `TELEOP_MIMIC_INTERVENE_DEG` | `10` | leader-vs-goal gap that counts as a push; `0` disables it |
+| `TELEOP_MIMIC_INTERVENE_GRIPPER` | `20` | the same threshold on the gripper's 0-100 travel |
+| `TELEOP_MIMIC_HOLD_S` | `0.2` | how long that gap must hold before the arm changes hands |
+| `TELEOP_MIMIC_TORQUE_LIMIT` | `500` | leader holding torque, per mille; `0` leaves the motor's own |
 | `DATASET_REPO_ID` | `binhpham/candy-shop` | corpus id (`org/name`) |
 | `DATASET_ROOT` | `$HF_LEROBOT_HOME/<repo-id>` | where the corpus is written |
 | `DATASET_TASK` | `pick up the candy` | initial task label |
@@ -82,6 +146,8 @@ training time, so what you record trains with no extra flags.
 | [recorder.py](recorder.py) | the HITL recorder (writer thread, action↔obs pairing) |
 | [library.py](library.py) | episode index + relabel/delete corpus rewrites |
 | [dataset_repair.py](dataset_repair.py) | crash-safe parquet footer rebuild |
+| [peers.py](peers.py) | the other operators: discovery, run/stop, claim + resume |
+| [mimic.py](mimic.py) | leader-follows-follower, and the push that takes the arm |
 | [session.py](session.py) | setup enumeration (ports, corpora) for the window |
 | [protocol.py](protocol.py) | the RPC contract shared by both processes |
 | [shortcuts.py](shortcuts.py) | rebindable key bindings |
