@@ -29,6 +29,17 @@ logger = logging.getLogger(__name__)
 # a peer that is not the teleoperator still fails fast — that returns an error rather
 # than hanging, so the timeout is not what bounds it.
 RPC_TIMEOUT_S = 60.0
+# The poll is not a command: `recorder_status` and friends are O(1) handlers, so a slow
+# one means the teleoperator's loop is busy, not that the work is long. Failing fast and
+# retrying on the next tick beats parking the whole poll loop — which is serial — on one
+# call for a minute and showing a minute of frozen numbers.
+POLL_TIMEOUT_S = 10.0
+# How long a request may take to reach the peer and have its *ack* come back, before
+# `response_timeout` even starts counting. The SDK default is 7 s, which the tick loop
+# can exceed while it drives the leader — and the failure reads as "Connection timeout",
+# nothing to do with the timeouts above. Sized for a peer that is briefly busy, not for
+# one that is gone: discovery already removes those.
+ACK_TIMEOUT_S = 20.0
 
 
 class RecorderClient:
@@ -66,6 +77,9 @@ class RecorderClient:
         self._target: Optional[str] = None
         self._connection = "connecting"
         self._notice = ""
+        # A refusal is the teleoperator's own answer and stands until dismissed; a
+        # transport complaint is only true until the next reply proves otherwise.
+        self._notice_sticky = False
 
         # A lock here only because a slot is a (seq, array) pair and a torn read
         # would mismatch them; held just for the dict assignment.
@@ -166,6 +180,10 @@ class RecorderClient:
 
     def clear_notice(self) -> None:
         self._notice = ""
+        self._notice_sticky = False
+
+    def _set_notice(self, message: str, *, sticky: bool) -> None:
+        self._notice, self._notice_sticky = message, sticky
 
     def frame(self, camera: str) -> Optional[tuple[int, np.ndarray]]:
         """Latest `(sequence, HxWx3 uint8 RGB)` for `camera`, or None. The
@@ -179,11 +197,12 @@ class RecorderClient:
         """Fire an RPC without waiting; a refusal lands in `notice`, state changes show up in the next poll."""
         loop = self._loop
         if loop is None or self._target is None:
-            self._notice = "not connected to a teleoperator"
+            self._set_notice("not connected to a teleoperator", sticky=False)
             return
         asyncio.run_coroutine_threadsafe(self._call(method, payload), loop)
 
-    async def _call(self, method: str, payload: Optional[dict] = None) -> Optional[dict]:
+    async def _call(self, method: str, payload: Optional[dict] = None,
+                    *, timeout: float = RPC_TIMEOUT_S) -> Optional[dict]:
         target, room = self._target, self._room
         if target is None or room is None:
             return None
@@ -192,19 +211,24 @@ class RecorderClient:
                 destination_identity=target,
                 method=method,
                 payload=json.dumps(payload or {}),
-                response_timeout=RPC_TIMEOUT_S,
+                response_timeout=timeout,
+                max_round_trip_latency=ACK_TIMEOUT_S,
             )
         except Exception as exc:
-            self._notice = f"{method}: {exc}"
+            self._set_notice(f"{method}: {exc}", sticky=False)
             return None
         try:
             reply = json.loads(raw)
         except json.JSONDecodeError:
-            self._notice = f"{method}: malformed reply"
+            self._set_notice(f"{method}: malformed reply", sticky=False)
             return None
         if not reply.get("ok"):
-            self._notice = reply.get("error") or f"{method} refused"
+            self._set_notice(reply.get("error") or f"{method} refused", sticky=True)
             return None
+        # A reply is proof the link is up, so a transport complaint from a moment ago is
+        # no longer true — otherwise one stall leaves the banner up for the whole session.
+        if not self._notice_sticky:
+            self._notice = ""
         return reply
 
     # --- the background loop -------------------------------------------------
@@ -262,11 +286,12 @@ class RecorderClient:
         while not self._stop.is_set():
             if self._target is not None:
                 if tick % metrics_every == 0:
-                    if (metrics := await self._call(protocol.METHOD_METRICS)) is not None:
+                    if (metrics := await self._call(
+                            protocol.METHOD_METRICS, timeout=POLL_TIMEOUT_S)) is not None:
                         metrics.pop("ok", None)
                         self._metrics = metrics
                 tick += 1
-                status = await self._call(protocol.METHOD_STATUS)
+                status = await self._call(protocol.METHOD_STATUS, timeout=POLL_TIMEOUT_S)
                 if status is not None:
                     status.pop("ok", None)
                     self._status = status
@@ -287,6 +312,7 @@ class RecorderClient:
             page = await self._call(
                 protocol.METHOD_EPISODES,
                 {"offset": offset, "limit": protocol.EPISODE_PAGE_LIMIT},
+                timeout=POLL_TIMEOUT_S,
             )
             if page is None:
                 return False

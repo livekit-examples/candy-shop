@@ -56,6 +56,12 @@ logger = logging.getLogger(__name__)
 
 PACKAGE_DIR = pathlib.Path(__file__).resolve().parent
 
+# A tick over this has stopped answering RPCs for that long: the leader's bus reads run
+# on the event loop, so an over-budget body is the loop being unavailable, not merely a
+# late frame. Well under the 20 s the window allows for an ack, so the warning arrives
+# before the timeout does.
+SLOW_TICK_S = 0.5
+
 
 class Hotkeys:
     """Non-blocking single-letter key capture from the terminal's own stdin.
@@ -1062,8 +1068,10 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
         except (NotImplementedError, RuntimeError):
             pass  # platform without add_signal_handler
 
+    worst_tick = 0.0
     try:
         async for tick in pace(fps):
+            tick_started = time.perf_counter()
             recorder, jobs = rt.recorder, rt.jobs
             for key in hotkeys.pop():
                 if key in key_claim:
@@ -1176,8 +1184,16 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
                 if recorder.ensure_dataset(frame_bytes_to_numpy_rgb(f0.data, f0.width, f0.height)):
                     print(f"[teleoperator] dataset ready (episodes so far={recorder.episode_count})")
 
+            worst_tick = max(worst_tick, time.perf_counter() - tick_started)
+
             # Every 5s: surface dropped rows, and notice the UI window closing.
             if tick % (fps * 5) == 0:
+                if worst_tick > SLOW_TICK_S:
+                    print(f"[teleoperator] slow tick: {worst_tick * 1000:.0f}ms worst in "
+                          f"the last 5s (budget {1000 / fps:.0f}ms) — the leader bus is "
+                          f"blocking the event loop, so RPCs from the window and claims "
+                          f"can time out. Check the leader's USB link.")
+                worst_tick = 0.0
                 if recorder is not None and recorder.is_recording:
                     _report_health(recorder, fps)
                 ui.poll()
