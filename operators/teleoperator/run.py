@@ -9,8 +9,8 @@ The review UI (``teleoperator-ui``) is a separate process driving this one over
 ``protocol``'s RPCs, so its repaints/crashes can't stall a recording. Run:
 ``uv run teleoperator`` (spawns the UI child; ``--no-ui`` records headless).
 
-Terminal hotkeys: c=claim/release the arm, m=mimic, r=record, [=discard, t=set task,
-x=quit.
+Terminal hotkeys: c=claim/release the arm, m=mimic, f=free the leader (torque off),
+r=record, [=discard, t=set task, x=quit.
 """
 from __future__ import annotations
 
@@ -354,11 +354,23 @@ def _report_health(recorder: Recorder, fps: int) -> None:
               f"congestion. Rows are kept, but their detail is upscaled.")
 
 
+# Seconds between reconnect attempts; the last value repeats forever. The early ones
+# are for a port that blipped, the cap is for a human walking back to the bench — and it
+# never gives up, because the alternative is a recorder sitting idle next to a leader
+# that has been plugged back in.
+RECONNECT_BACKOFF_S = (1.0, 2.0, 4.0, 8.0, 15.0)
+
+
 class Runtime:
     """The leader arm and the dataset writer — the two things setup provides.
 
     They start empty so the recorder can join the room with nothing open and be
-    configured afterwards. Everything on the hot path must tolerate `None`."""
+    configured afterwards. Everything on the hot path must tolerate `None`.
+
+    `leader` is a *handle*, not the session: a serial port that drops is replaced in
+    place by `connect_leader`, and `configured` deliberately doesn't look at it, so a
+    reconnect leaves the corpus open and the window on the session screen rather than
+    throwing the operator back to setup mid-recording."""
 
     def __init__(self) -> None:
         self.leader: Optional[SO101WithSliderLeader] = None
@@ -367,28 +379,79 @@ class Runtime:
         self.opening = ""      # what it's opening, "" when idle
         self.error = ""        # why the last attempt failed
         self.started_at = 0.0
+        self.port = ""         # the port this session opened; what a reconnect re-opens
+        self.leader_id = ""
+        self.leader_error = ""   # why the link dropped, "" while it's healthy
+        self.reconnecting = ""   # what the retry is doing, "" when idle
+        self.attempts = 0        # reconnect attempts since the link dropped
 
     @property
     def configured(self) -> bool:
-        return self.leader is not None and self.recorder is not None
+        """A session exists: a port was chosen and the dataset is open. Not the same
+        as the leader answering right now — see the class docstring."""
+        return bool(self.port) and self.recorder is not None
 
     def open(self, *, port: str, leader_id: str, recorder: Recorder) -> None:
         """Open the leader bus, then adopt the dataset. Blocking — call on a worker
         thread, never the event loop: the serial open blocks, and calibration
-        (if the motors disagree with stored calibration) reads from the terminal.
+        (if the motors disagree with stored calibration) reads from the terminal."""
+        self.port, self.leader_id = port, leader_id
+        try:
+            self.connect_leader()
+        except Exception:
+            # A port only counts as this session's once it has answered: `port` is what
+            # a reconnect re-opens and what the window reads as "there is a link here",
+            # and a first open that failed has neither — setup is its retry.
+            self.port = ""
+            raise
+        self.recorder = recorder
+        self.jobs = JobRunner(recorder)
+
+    def connect_leader(self) -> None:
+        """(Re)open the leader's serial bus, replacing whatever handle was there.
+
+        Blocking, worker-thread only, same as `open`. The old handle goes first —
+        best-effort, since the usual reason to be here is that it stopped answering —
+        and the new one is published only once `connect()` returned, so the tick loop
+        never sees a half-open bus.
 
         ``cruise``/``max`` velocity are the held-arrow speed and Up-arrow trim
         ceiling, in raw ticks/s."""
+        self.drop_leader()
         leader = SO101WithSliderLeader(SO101WithSliderLeaderConfig(
-            id=leader_id,
-            port=port,
+            id=self.leader_id,
+            port=self.port,
             cruise_velocity=int(env("TELEOP_CRUISE_VELOCITY", "1500")),
             max_velocity=int(env("TELEOP_MAX_VELOCITY", "3000")),
         ))
         leader.connect()
         self.leader = leader
-        self.recorder = recorder
-        self.jobs = JobRunner(recorder)
+
+    def detach_leader(self) -> Optional[SO101WithSliderLeader]:
+        """Take the handle off the hot path and hand it back, without touching the bus.
+
+        Split from closing it because closing is not cheap: lerobot drops torque on the
+        way out, and on a bus that has stopped answering that is five retries against a
+        serial timeout. On the event loop that would stall the tick and Portal's
+        callbacks; the caller closes it on a worker instead.
+        """
+        old, self.leader = self.leader, None
+        return old
+
+    @staticmethod
+    def close_leader(old: Optional[SO101WithSliderLeader]) -> None:
+        """Best-effort disconnect. Never raises: a bus that already died refuses its own
+        disconnect, and there is nothing left to do about it. Blocking."""
+        if old is None:
+            return
+        try:
+            old.disconnect()
+        except Exception as exc:
+            logger.warning("leader disconnect failed (bus already gone?): %s", exc)
+
+    def drop_leader(self) -> None:
+        """Detach and close, for callers already off the event loop."""
+        self.close_leader(self.detach_leader())
 
     def close(self) -> None:
         try:
@@ -397,11 +460,7 @@ class Runtime:
         finally:
             # Runs even if finalize raised: leaving the motors driven is its own
             # failure, and the caller still has an operator to disconnect.
-            if self.leader is not None:
-                try:
-                    self.leader.disconnect()
-                except Exception:
-                    logger.exception("leader disconnect failed")
+            self.drop_leader()
 
 
 # --- main -------------------------------------------------------------------
@@ -431,6 +490,8 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
         intervene_deg=float(env("TELEOP_MIMIC_INTERVENE_DEG", "10")),
         intervene_gripper=float(env("TELEOP_MIMIC_INTERVENE_GRIPPER", "20")),
         intervene_hold_s=float(env("TELEOP_MIMIC_HOLD_S", "0.2")),
+        follow_lag_s=float(env("TELEOP_MIMIC_LAG_S", "0.25")),
+        smooth_s=float(env("TELEOP_MIMIC_SMOOTH_S", "0.08")),
         torque_limit=int(env("TELEOP_MIMIC_TORQUE_LIMIT", "500")),
     )
 
@@ -445,9 +506,11 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
     key_release = shortcuts.terminal_chars(keys, "release")
     key_resume = shortcuts.terminal_chars(keys, "resume")
     key_mimic = shortcuts.terminal_chars(keys, "mimic")
+    key_relax = shortcuts.terminal_chars(keys, "relax")
+    key_reconnect = shortcuts.terminal_chars(keys, "reconnect")
     key_stop_all = shortcuts.terminal_chars(keys, "stop_all")
     bound = (key_record | key_discard | key_claim | key_release | key_resume
-             | key_mimic | key_stop_all)
+             | key_mimic | key_relax | key_reconnect | key_stop_all)
     # Bindings match before t/x below, so a binding on either would shadow it
     # silently — warn rather than leave you wondering why `t` stopped working.
     if clash := ({"t", "x"} & bound):
@@ -490,6 +553,82 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
                 rt.opening = ""
 
         threading.Thread(target=work, name="open-runtime", daemon=True).start()
+
+    # --- the leader link ------------------------------------------------------
+    # One serial port carries the action read *and* mimic's torque writes, so either
+    # failing means the same thing: the leader is gone. It used to mean the recorder
+    # was gone too — the read raised straight out of the tick loop, taking the
+    # in-flight episode with it — so both now funnel into `lost_leader`.
+
+    link_lock = threading.Lock()
+    link_wake = threading.Event()      # jumps the backoff when a human asks
+    shutting_down = threading.Event()  # stops the retry racing `rt.close()`
+
+    def lost_leader(detail: str) -> None:
+        """Park the leader link and start bringing it back. Idempotent: a second report
+        while a retry is running just hurries it along.
+
+        Called from the tick loop, so nothing here touches the bus — the handle is
+        detached and the worker closes it.
+        """
+        with link_lock:
+            if rt.reconnecting:
+                link_wake.set()
+                return
+            rt.reconnecting = f"reconnecting to {rt.port}"
+            rt.leader_error = detail
+            rt.attempts = 0
+        # Mimic is told to forget rather than to switch off: switching off writes to a
+        # port that is no longer there.
+        mimic.forget()
+        stale = rt.detach_leader()
+        print(f"[teleoperator] leader link down ({detail}); reconnecting to {rt.port}")
+        threading.Thread(target=reconnect_work, args=(stale,),
+                         name="leader-reconnect", daemon=True).start()
+
+    def reconnect_work(stale: Optional[SO101WithSliderLeader]) -> None:
+        """Close the dead handle, then retry the bus until it answers. Worker thread:
+        both ends of this block — a disconnect on a dead bus waits out its timeouts, and
+        lerobot may stop to calibrate, which reads stdin."""
+        rt.close_leader(stale)
+        attempt = 0
+        while not shutting_down.is_set():
+            attempt += 1
+            rt.attempts = attempt
+            rt.reconnecting = f"reconnecting to {rt.port} (attempt {attempt})"
+            hotkeys.pause()  # calibration would otherwise lose its ENTER to the reader
+            try:
+                rt.connect_leader()
+            except Exception as exc:
+                rt.leader_error = f"{rt.port}: {exc}"
+                logger.warning("leader reconnect attempt %d failed: %s", attempt, exc)
+            else:
+                rt.leader_error, rt.attempts, rt.reconnecting = "", 0, ""
+                if shutting_down.is_set():
+                    # Won the race against `rt.close()`; nothing will ever read this
+                    # handle, so close it here rather than leaking the port.
+                    rt.drop_leader()
+                    return
+                print(f"[teleoperator] leader back on {rt.port} — mimic is off; switch "
+                      f"it on again once the arm is in your hand")
+                return
+            finally:
+                hotkeys.resume()
+            delay = RECONNECT_BACKOFF_S[min(attempt, len(RECONNECT_BACKOFF_S)) - 1]
+            # Once a minute at the cap: this can run for as long as the cable is out,
+            # and a line per second would bury everything else in the terminal.
+            if attempt == 1 or attempt % 4 == 0:
+                print(f"[teleoperator] leader still not answering ({rt.leader_error}); "
+                      f"retrying every {delay:.0f}s — replug it, or hit Reconnect in "
+                      f"the window to try now")
+            link_wake.wait(delay)
+            link_wake.clear()
+        rt.reconnecting = ""
+
+    def relax_leader(reason: str) -> None:
+        """Torque off, mimic off. The escape hatch for an arm left stiff."""
+        mimic.release(rt.leader)
+        print(f"[teleoperator] leader torque off ({reason})")
 
     # Both callbacks must stay O(1) so Portal's video-receive worker reacquires
     # the GIL promptly.
@@ -584,6 +723,18 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
             return {}
         return parsed if isinstance(parsed, dict) else {}
 
+    def leader_snapshot() -> dict:
+        """The link, not the handle: `connected` false with `state` reconnecting is a
+        session that is still set up and still holds its corpus."""
+        return {
+            "connected": rt.leader is not None,
+            "port": rt.port,
+            "state": ("open" if rt.leader is not None
+                      else "reconnecting" if rt.reconnecting else "down"),
+            "detail": rt.leader_error or rt.reconnecting,
+            "attempts": rt.attempts,
+        }
+
     def status() -> dict:
         """Always answers, configured or not — the setup screen needs a reply."""
         base = {
@@ -599,6 +750,7 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
             "peers": control.snapshot(),
             "suspended": control.suspended,
             "mimic": mimic.snapshot(),
+            "leader": leader_snapshot(),
         }
         recorder, jobs = rt.recorder, rt.jobs
         if recorder is None or jobs is None:
@@ -771,11 +923,25 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
 
     async def rpc_mimic(data: RpcInvocationData) -> str:
         if rt.leader is None:
-            return refuse("the leader arm is not open yet")
+            return refuse(rt.reconnecting or "the leader arm is not open yet")
         mimic.set_enabled(bool(payload(data).get("enabled")), rt.leader)
         print(f"[teleoperator] mimic {'on' if mimic.enabled else 'off'} "
               f"(requested by '{data.caller_identity}')")
         return reply(mimic=mimic.snapshot())
+
+    async def rpc_relax(data: RpcInvocationData) -> str:
+        if rt.leader is None:
+            return refuse("the leader arm is not connected")
+        relax_leader(f"asked by '{data.caller_identity}'")
+        return reply(mimic=mimic.snapshot())
+
+    async def rpc_reconnect(data: RpcInvocationData) -> str:
+        if not rt.port:
+            return refuse("nothing to reconnect to — choose a port first")
+        # Also the way to cycle a leader that is up but misbehaving, so this doesn't
+        # check whether the link is down first.
+        lost_leader(f"reconnect asked by '{data.caller_identity}'")
+        return reply(leader=leader_snapshot())
 
     async def rpc_relabel(data: RpcInvocationData) -> str:
         recorder, jobs = rt.recorder, rt.jobs
@@ -832,6 +998,8 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
         (protocol.METHOD_PEER_RUN, rpc_peer_run),
         (protocol.METHOD_PEER_STOP, rpc_peer_stop),
         (protocol.METHOD_MIMIC, rpc_mimic),
+        (protocol.METHOD_RELAX, rpc_relax),
+        (protocol.METHOD_RECONNECT, rpc_reconnect),
         (protocol.METHOD_RELABEL, rpc_relabel),
         (protocol.METHOD_DELETE, rpc_delete),
     ):
@@ -872,6 +1040,7 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
 
     print(f"[teleoperator] hotkeys: {shortcuts.describe(keys, 'claim')}=claim/release arm  "
           f"{shortcuts.describe(keys, 'mimic')}=mimic  "
+          f"{shortcuts.describe(keys, 'relax')}=free leader  "
           f"{shortcuts.describe(keys, 'record')}=record  "
           f"{shortcuts.describe(keys, 'discard')}=discard  t=set task  x=quit")
     hotkeys.start()
@@ -912,6 +1081,16 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
                     else:
                         mimic.set_enabled(not mimic.enabled, rt.leader)
                         print(f"[teleoperator] mimic {'on' if mimic.enabled else 'off'}")
+                elif key in key_relax:
+                    if rt.leader is None:
+                        print("[teleoperator] no leader arm to release")
+                    else:
+                        relax_leader("hotkey")
+                elif key in key_reconnect:
+                    if not rt.port:
+                        print("[teleoperator] nothing to reconnect to — choose a port first")
+                    else:
+                        lost_leader("reconnect asked from the terminal")
                 elif key in key_stop_all:
                     fire(stop_everything("hotkey"), "stop-all-key")
                 elif key == "x":
@@ -961,22 +1140,33 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
             # Always send once the arm is open (even during a job): the robot
             # gates on the active operator, so keeping the leader in sync makes
             # takeover instant. Only recording pauses during a rewrite.
-            if rt.leader is not None:
-                action = rt.leader.get_action()
-                op.send_action(action, timestamp_us=int(time.time() * 1_000_000))
-                # Push detection before the next goal is written, so the leader's
-                # position is judged against the goal that was actually in force.
-                mimic.check_push(action, on_intervene)
-                # Mimic only makes sense while somebody else drives: the leader can't
-                # be driven and be doing the driving at the same time.
-                #
-                # Off the raw state stream, not `latest_obs`: mimic wants joint positions
-                # as fresh as the wire has them, and an observation is a state that also
-                # found frames to pair with — it can be a tick or two behind, or absent
-                # entirely when the video runs ahead of the sync window.
-                robot_state = op.get_state()
-                mimic.update(rt.leader, robot_state.values if robot_state else None,
-                             allowed=not control.claiming)
+            leader = rt.leader
+            if leader is not None:
+                try:
+                    action = leader.get_action()
+                    op.send_action(action, timestamp_us=int(time.time() * 1_000_000))
+                except Exception as exc:
+                    # Unplugged, or lerobot's own ESC handler closed the bus under us.
+                    # Uncaught this ended the process, discarding the in-flight episode.
+                    lost_leader(f"reading the leader failed: {exc}")
+                else:
+                    # Push detection before the next goal is written, so the leader's
+                    # position is judged against the goal that was actually in force.
+                    mimic.check_push(action, on_intervene)
+                    # Mimic only makes sense while somebody else drives: the leader can't
+                    # be driven and be doing the driving at the same time.
+                    #
+                    # Off the raw state stream, not `latest_obs`: mimic wants joint positions
+                    # as fresh as the wire has them, and an observation is a state that also
+                    # found frames to pair with — it can be a tick or two behind, or absent
+                    # entirely when the video runs ahead of the sync window.
+                    robot_state = op.get_state()
+                    mimic.update(leader, robot_state.values if robot_state else None,
+                                 allowed=not control.claiming)
+                    if mimic.failure:
+                        # Mimic only ever fails on the bus, and a bus that refuses a
+                        # torque write is the link the next read would fail on anyway.
+                        lost_leader(mimic.failure)
 
             # Lazy-build the dataset once a frame reveals the resolution.
             if (recorder is not None and not recorder.is_ready
@@ -995,6 +1185,8 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
     except KeyboardInterrupt:
         print("\n[teleoperator] stopping ...")
     finally:
+        shutting_down.set()
+        link_wake.set()  # so a retry sleeping on the backoff notices and stops
         hotkeys.stop()
         ui.stop()
         # Before the bus closes: leaving the leader torqued would hold it stiff for

@@ -71,6 +71,14 @@ METHOD_PEER_STOP = "recorder_peer_stop"
 # observed pose, so the human feels what the policy is doing and can take the arm
 # from a matched pose instead of snapping it. Refused until the leader is open.
 METHOD_MIMIC = "recorder_mimic"
+# {} -> {"mimic": {...}}. Switch mimic off and drop the leader's torque outright.
+# The escape hatch: a half-failed engage leaves the arm stiff with mimic reporting
+# `error`, and there the toggle has nothing to switch off.
+METHOD_RELAX = "recorder_relax"
+# {} -> {"leader": {...}}. Re-open the leader's serial bus without touching the
+# open dataset. The recorder retries a dropped link on its own; this jumps the
+# backoff once the cable is back in. Also the way out of a failed first open.
+METHOD_RECONNECT = "recorder_reconnect"
 
 # --- corpus mutation (scheduled as a job) -------------------------------------
 # {"episodes": {"<index>": "new task", ...}} -> {"job": "relabel"}
@@ -109,6 +117,7 @@ STATUS_KEYS = (
     "peers",           # peer operators; see PEER_KEYS
     "suspended",       # identities a claim preempted, waiting on METHOD_RESUME
     "mimic",           # the mimic toggle's own state; see MIMIC_KEYS
+    "leader",          # the leader arm's link; see LEADER_KEYS
 )
 
 # One entry per peer operator the room can offer: everything `shared.operators`
@@ -125,6 +134,17 @@ PEER_KEYS = (
     "error",           # why its last run failed; "" if it didn't
     "result",          # one-line summary of its last completed run
     "elapsed_s",       # how long the open run has been going
+)
+
+# The leader's serial link, which outlives any one handle on it: a dropped bus is a
+# reconnect, not a re-setup, so `configured` stays true across one and the corpus stays
+# open. `state` is what the window reads to decide between a badge and a banner.
+LEADER_KEYS = (
+    "connected",       # the bus is open and answering right now
+    "port",            # serial port this session opened
+    "state",           # open | reconnecting | down
+    "detail",          # why it dropped, or what the retry is doing
+    "attempts",        # reconnect attempts since the link dropped
 )
 
 MIMIC_KEYS = (
