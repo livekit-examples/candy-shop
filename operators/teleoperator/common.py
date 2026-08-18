@@ -116,4 +116,9 @@ async def pace(fps: int) -> AsyncIterator[int]:
         if sleep_for > 0:
             await asyncio.sleep(sleep_for)
         else:
+            # An overrunning tick still has to hand the loop back. `yield` is not a
+            # suspension point, so without this a body that stays over budget (a slow
+            # leader bus) runs back-to-back forever: no RPC is ever acked, and nothing
+            # `fire()` scheduled — a claim, a stop — is ever started.
+            await asyncio.sleep(0)
             next_tick = time.perf_counter()
