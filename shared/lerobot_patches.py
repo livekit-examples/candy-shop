@@ -91,3 +91,74 @@ def require_pretrained_weights() -> None:
         ) from exc
 
     logger.info("[patches] pretrained weights for %s resolved", path)
+
+
+def enable_relative_actions(exclude_joints: tuple[str, ...] = ()) -> None:
+    """Train multi_task_dit on action deltas instead of absolute poses.
+
+    multi_task_dit is absolute-only: it has no ``use_relative_actions`` flag and its
+    pipeline is ``rename -> batch -> tokenize -> device -> normalize``. The two steps
+    that do the work are policy-agnostic and live in ``lerobot.processor``, so this
+    splices them into openpi's order, the one pi0/pi0.5/pi0-FAST/GR00T all use:
+
+        raw -> relative -> normalize -> model -> unnormalize -> absolute
+
+    Doing it in the pipeline rather than by rewriting the dataset is not a stylistic
+    choice. ``to_relative_actions`` broadcasts *one* state across the whole chunk, so
+    every action is a delta from the pose at chunk start -- which is the pose inference
+    actually knows. A rewritten dataset can only store ``action[t] - state[t]``, each
+    action relative to its own timestep, because row ``t+k`` belongs to 32 different
+    chunks with 32 different reference poses. Serving that requires integrating deltas
+    and assuming the follower reached every previous command exactly; on this rig it
+    did not, and the error tracked state drift precisely.
+
+    The pair is stateful: the relative step caches the state it subtracted and the
+    absolute step reads it back. Nothing has to be threaded through serving, because
+    ``PolicyProcessorPipeline`` serializes both steps into the checkpoint and
+    ``make_pre_post_processors`` calls ``_reconnect_relative_absolute_steps`` when it
+    loads one. run.py needs no change: it calls ``_pre`` once per chunk and ``_post``
+    per action, so every action converts back against the same chunk-start pose.
+
+    NOTE: the normalizer must be fed relative-action stats (``lerobot-edit-dataset
+    --operation.type recompute_stats --operation.relative_action true``). Deltas
+    normalized against absolute statistics are centred nowhere near zero.
+    """
+    from lerobot.policies.multi_task_dit import processor_multi_task_dit as module
+    from lerobot.processor import AbsoluteActionsProcessorStep, RelativeActionsProcessorStep
+
+    original = module.make_multi_task_dit_pre_post_processors
+    if getattr(original, "_relative", False):
+        return
+
+    def with_relative_actions(config, dataset_stats=None):
+        preprocessor, postprocessor = original(config, dataset_stats)
+
+        relative = RelativeActionsProcessorStep(
+            enabled=True,
+            exclude_joints=list(exclude_joints),
+            action_names=getattr(config, "action_feature_names", None),
+        )
+        absolute = AbsoluteActionsProcessorStep(enabled=True, relative_step=relative)
+
+        # Position by class rather than index: the pipeline these land in is lerobot's,
+        # and a step added upstream would silently shift any hardcoded offset.
+        def index_of(steps, name, default):
+            for i, step in enumerate(steps):
+                if type(step).__name__ == name:
+                    return i
+            logger.warning("[patches] %s not found in pipeline; inserting at %d", name, default)
+            return default
+
+        pre_steps = list(preprocessor.steps)
+        pre_steps.insert(index_of(pre_steps, "NormalizerProcessorStep", len(pre_steps)), relative)
+        preprocessor.steps = pre_steps
+
+        post_steps = list(postprocessor.steps)
+        post_steps.insert(index_of(post_steps, "UnnormalizerProcessorStep", -1) + 1, absolute)
+        postprocessor.steps = post_steps
+
+        logger.info("[patches] relative actions on (excluding %s)", list(exclude_joints) or "nothing")
+        return preprocessor, postprocessor
+
+    with_relative_actions._relative = True
+    module.make_multi_task_dit_pre_post_processors = with_relative_actions

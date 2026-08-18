@@ -19,12 +19,27 @@ the configuration that is actually in use.
 """
 from __future__ import annotations
 
-from shared.lerobot_patches import require_pretrained_weights, tolerate_missing_symlinks
+import os
+
+from shared.lerobot_patches import (
+    enable_relative_actions,
+    require_pretrained_weights,
+    tolerate_missing_symlinks,
+)
+
+# Joints kept absolute when RELATIVE_ACTIONS is on. The gripper commands an aperture
+# rather than a motion, and slider.vel is a velocity the policy pins to 0 -- neither is
+# a pose a delta means anything against.
+RELATIVE_EXCLUDE = ("gripper.pos", "slider.vel")
 
 
 def cli() -> None:
     tolerate_missing_symlinks()
     require_pretrained_weights()
+    # Env rather than --policy.*: multi_task_dit's config has no relative-action field,
+    # and draccus rejects flags its dataclass does not declare.
+    if os.environ.get("RELATIVE_ACTIONS", "").lower() in ("1", "true", "yes"):
+        enable_relative_actions(exclude_joints=RELATIVE_EXCLUDE)
     from lerobot.scripts.lerobot_train import main
 
     main()

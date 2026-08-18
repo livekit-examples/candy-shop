@@ -112,6 +112,14 @@ envs:
   # perturbing hue attacks the one feature the task depends on.
   IMAGE_TFS: '{"brightness":{"type":"ColorJitter","kwargs":{"brightness":[0.8,1.2]}},"contrast":{"type":"ColorJitter","kwargs":{"contrast":[0.7,1.3]}},"sharpness":{"type":"SharpnessJitter","kwargs":{"sharpness":[0.6,1.4]}},"rotation":{"type":"RandomRotation","kwargs":{"degrees":[-5,5]}},"translation":{"type":"RandomAffine","kwargs":{"degrees":0,"translate":[0.1,0.1]}}}'
 
+  # Relative actions: the model predicts deltas from the pose at chunk start instead of
+  # absolute joint targets, which should make it tolerant of starting somewhere the
+  # dataset never showed it and of calibration drift between sessions. multi_task_dit has
+  # no flag for this -- operators/policy/train.py splices lerobot's processor pair in when
+  # this is set, and the normalizer then needs delta statistics rather than absolute ones,
+  # which is what the recompute_stats below produces.
+  RELATIVE_ACTIONS: "0"
+
   NUM_WORKERS: 12
   EXTRA_ARGS: ""
 
@@ -143,6 +151,21 @@ run: |
     --new_repo_id "$DATASET_REPO_ID" --new_root ~/data/candy-train \
     --operation.type delete_episodes --operation.episode_indices "$HOLDOUT_EPISODES"
 
+  TRAIN_ROOT="$HOME/data/candy-train"
+  TRAIN_REPO="$DATASET_REPO_ID"
+  if [ "$RELATIVE_ACTIONS" = "1" ]; then
+    # Stats over action-minus-state, chunk_size matching HORIZON because the delta is
+    # taken against the pose at chunk start. Written to a separate root: recompute_stats
+    # refuses to write back into the dataset it read.
+    uv run --only-group train-dit lerobot-edit-dataset \
+      --repo_id "$DATASET_REPO_ID" --root "$HOME/data/candy-train" \
+      --new_repo_id "${DATASET_REPO_ID}-rel" --new_root "$HOME/data/candy-train-rel" \
+      --operation.type recompute_stats --operation.relative_action true \
+      --operation.chunk_size "$HORIZON"
+    TRAIN_ROOT="$HOME/data/candy-train-rel"
+    TRAIN_REPO="${DATASET_REPO_ID}-rel"
+  fi
+
   uv run --only-group train-dit python -m operators.policy.train \
     --policy.type=multi_task_dit \
     --policy.device=cuda \
@@ -167,8 +190,8 @@ run: |
     --policy.scheduler_warmup_steps=0 \
     --policy.use_amp=true \
     ${OBJECTIVE_ARGS} \
-    --dataset.repo_id="$DATASET_REPO_ID" \
-    --dataset.root="$HOME/data/candy-train" \
+    --dataset.repo_id="$TRAIN_REPO" \
+    --dataset.root="$TRAIN_ROOT" \
     --dataset.video_backend=torchcodec \
     --dataset.image_transforms.enable=true \
     --dataset.image_transforms.max_num_transforms=3 \
