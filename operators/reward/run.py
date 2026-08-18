@@ -52,13 +52,14 @@ from livekit.portal import (
 )
 
 from shared.common import env_str, load_env, mint_token, required_env
+from shared.operators import POLICY, REWARD
 from shared.rest_pose import ALL_ACTION_KEYS
 
 from operators.reward.sarm import (ClipEncoder, DEFAULT_CHECKPOINT, DoneRule, ProgressScorer,
                                    StateNormalizer, load_reward_model)
 
-IDENTITY = "reward-operator"
-POLICY_IDENTITY = "policy-operator"
+IDENTITY = REWARD
+POLICY_IDENTITY = POLICY
 CONFIG_PATH = pathlib.Path(__file__).resolve().parent.parent.parent / "portal.yaml"
 
 logger = logging.getLogger(__name__)

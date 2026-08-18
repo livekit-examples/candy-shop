@@ -17,12 +17,13 @@ from livekit.portal import Operator, OperatorConfig, RpcError, RpcInvocationData
 
 from shared.common import env_str, load_env, mint_token, required_env
 from shared.config import FPS
+from shared.operators import MOVE_TO
 
 from operators.move_to import config
 from operators.move_to.servo import SliderServo
 from operators.move_to.vision import ArucoDetector, SafeZone, load_safe_zone
 
-IDENTITY = "move-to-operator"
+IDENTITY = MOVE_TO
 CONFIG_PATH = pathlib.Path(__file__).resolve().parent.parent.parent / "portal.yaml"
 
 logger = logging.getLogger(__name__)

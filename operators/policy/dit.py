@@ -29,6 +29,14 @@ from shared.rest_pose import ALL_ACTION_KEYS, ARM_POS_KEYS
 
 POLICY_TYPE = "multi_task_dit"
 
+# Diffusion only. multi_task_dit also trains a flow-matching objective, and on paper it
+# is the better choice here -- it holds accuracy down to 4 integration steps (17 ms per
+# chunk against diffusion's 180 ms at 100) and scored slightly better on the holdout at
+# matched training steps. On the arm it picked the wrong candy and diffusion did not,
+# which is the third time an offline metric has disagreed with the robot on this task.
+# run.py refuses a flow-matching checkpoint rather than serving one by accident.
+OBJECTIVE = "diffusion"
+
 # Where operators/policy/skypilot_dit.yaml writes. run.py has no default checkpoint:
 # what it serves is always named explicitly (`--checkpoint` / POLICY_CHECKPOINT).
 DEFAULT_OUTPUT_DIR = "outputs/dit-candy"

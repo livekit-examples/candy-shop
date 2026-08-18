@@ -42,6 +42,7 @@ from lerobot.utils.constants import OBS_STATE
 
 from shared.common import env_str, load_env, mint_token, pace, required_env
 from shared.config import FPS
+from shared.operators import POLICY
 from shared.rest_pose import ARM_POS_KEYS, RESET_POSE_DEFAULTS, SLIDER_VEL_KEY
 
 import cv2
@@ -49,13 +50,14 @@ import cv2
 from operators.policy.settle import SettleGate
 from operators.policy.dit import (
     ACTION_NAMES,
+    OBJECTIVE,
     POLICY_TYPE,
     STATE_NAMES,
     expected_image_hw,
     resolve_camera_map,
 )
 
-IDENTITY = "policy-operator"
+IDENTITY = POLICY
 CONFIG_PATH = pathlib.Path(__file__).resolve().parent.parent.parent / "portal.yaml"
 
 # Every pick starts by folding here, because that is where every recorded episode
@@ -74,6 +76,30 @@ logger = logging.getLogger(__name__)
 
 def _now_us() -> int:
     return int(time.time() * 1_000_000)
+
+
+def _payload_task(data: RpcInvocationData, default: str) -> str:
+    """Parse an instruction from a bare string or ``{"task"|"instruction"|"prompt": ...}``.
+
+    Same shape as the reward operator's parser, and the same reason it exists: the
+    callers are a voice agent, a browser console and the teleoperator, and they don't
+    agree on whether a one-field payload is worth an envelope. Lost with the pi0 paths in
+    a68e388, which left every ``run_policy`` raising NameError.
+    """
+    payload = (data.payload or "").strip()
+    if not payload:
+        return default
+    if payload.startswith("{"):
+        try:
+            obj = json.loads(payload)
+        except json.JSONDecodeError:
+            raise RpcError.Error(code=1400, message="payload was not valid JSON", data=None)
+        for key in ("task", "instruction", "prompt"):
+            if obj.get(key):
+                return str(obj[key])
+        raise RpcError.Error(
+            code=1400, message="JSON payload had no task/instruction/prompt", data=None)
+    return payload
 
 
 class PolicyRunner:
@@ -108,6 +134,7 @@ class PolicyRunner:
         self._reprime = False  # set by set_task: refold before planning the new one
         self._on_tick = on_tick  # per-tick telemetry for the debug driver
         self._stop = asyncio.Event()
+        self._busy = False  # a pick is in flight; see `pick`
         op.on_observation(self._on_observation)
 
     def _on_observation(self, obs: Observation) -> None:
@@ -234,22 +261,38 @@ class PolicyRunner:
         return True
 
     async def pick(self, task: str) -> dict:
-        """Run the policy until done/timeout/stop, holding the slider still."""
-        self._task = task
-        self._reprime = False  # the _goto_start below is the priming for this task
-        self._stop.clear()
-        self._settle.reset()
-        await self._op.set_active_operator(self._op.local_identity())
-        self._policy.reset()
-        self._pre.reset()
-        self._post.reset()
-        logger.info("[policy] pick(%r): active operator -> %s", task, self._op.local_identity())
+        """Run the policy until done/timeout/stop, holding the slider still.
 
+        Refuses while a pick is already in flight, the way the reward operator's
+        ``run_task`` does: two picks would be two loops sending actions a tick apart on
+        the same arm. Reachable now that the reward operator is not the only caller —
+        the teleoperator's rail and the Playground console both drive this RPC directly.
+        """
+        if self._busy:
+            raise RpcError.Error(code=1409, message="policy operator already picking",
+                                 data=None)
+        # Everything from here runs under the finally that clears _busy. Setup used to
+        # sit above the try, so a failure in it -- set_active_operator losing the race
+        # with move_to's own claim is the one that bit -- left _busy set with no pick
+        # running. Nothing could clear it: `stop` only sets an event the (never started)
+        # loop reads, so every later run_policy got 1409 "already picking" until the
+        # process was restarted.
+        self._busy = True
         loop = asyncio.get_running_loop()
         t0 = time.monotonic()
         ticks = 0
         reason = "duration"
         try:
+            self._task = task
+            self._reprime = False  # the _goto_start below is the priming for this task
+            self._stop.clear()
+            self._settle.reset()
+            await self._op.set_active_operator(self._op.local_identity())
+            self._policy.reset()
+            self._pre.reset()
+            self._post.reset()
+            logger.info("[policy] pick(%r): active operator -> %s", task, self._op.local_identity())
+
             # The pose we arrive at is what the first chunk gets conditioned on.
             # A stop during the approach falls through to the loop's stop check.
             await self._goto_start()
@@ -314,31 +357,59 @@ class PolicyRunner:
                     self._on_tick({"tick": ticks, "infer_ms": infer_ms, "replan": replan,
                                    "cmd": cmd, "state": dict(self._state)})
         finally:
-            if all(key in self._state for key in ARM_POS_KEYS):
-                self._send_arm(0.0)
-            await self._op.set_active_operator(None)
+            # Clear the flag before the cleanup that can itself fail: releasing active
+            # control is a round trip, and letting it strand _busy would wedge the
+            # operator exactly the way setup used to.
+            self._busy = False
+            try:
+                if all(key in self._state for key in ARM_POS_KEYS):
+                    self._send_arm(0.0)
+                await self._op.set_active_operator(None)
+            except Exception:
+                logger.exception("[policy] cleanup after pick failed; operator stays available")
 
         elapsed = time.monotonic() - t0
         logger.info("[policy] pick done: reason=%s ticks=%d elapsed=%.2fs", reason, ticks, elapsed)
         return {"task": self._task, "reason": reason, "ticks": ticks, "elapsed_s": elapsed}
 
 
+def _set_inference_steps(policy, num_steps: int) -> None:
+    """Set the sampler's step count.
+
+    ``DiffusionObjective`` copies ``num_inference_steps`` off the config at
+    construction, so the config field is inert afterwards and only the objective's own
+    attribute is read at sampling time. Writing the config one raises nothing and
+    changes nothing -- it just serves at the checkpoint's default (100 steps, ~180 ms
+    per chunk) while ``--num-steps`` says otherwise.
+    """
+    policy.objective.num_inference_steps = num_steps
+
+
 def _load_policy(checkpoint: str, device: str, num_steps: int):
     """Load the checkpoint, wire its normalizer, and build the processors."""
     config_path = pathlib.Path(checkpoint) / "config.json"
     if config_path.is_file():
-        policy_type = json.loads(config_path.read_text()).get("type")
+        saved = json.loads(config_path.read_text())
+        policy_type = saved.get("type")
         if policy_type != POLICY_TYPE:
             raise RuntimeError(
                 f"{checkpoint} is a {policy_type!r} checkpoint; this operator serves "
                 f"{POLICY_TYPE!r} only. See operators/policy/RESULTS.md."
+            )
+        objective = saved.get("objective")
+        if objective != OBJECTIVE:
+            raise RuntimeError(
+                f"{checkpoint} was trained with objective={objective!r}; this operator "
+                f"serves {OBJECTIVE!r} only. On the arm, diffusion picked the right "
+                "candy and flow matching did not, despite flow scoring better offline. "
+                "See operators/policy/RESULTS.md."
             )
 
     logger.info("[policy] loading %s (downloads the CLIP encoders on first run)...", checkpoint)
     policy = get_policy_class(POLICY_TYPE).from_pretrained(checkpoint)
     policy.config.device = device
     if num_steps > 0:
-        policy.config.num_inference_steps = num_steps
+        _set_inference_steps(policy, num_steps)
     policy = policy.to(device)
     policy.eval()
 
@@ -365,8 +436,10 @@ def add_policy_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--duration", type=float, default=float(env_str("POLICY_DURATION_S", "0")),
                         help="Wall-clock cap in seconds; <=0 runs forever until a stop RPC (the reward operator drives this).")
     parser.add_argument("--num-steps", type=int, default=int(env_str("POLICY_NUM_STEPS", "0")),
-                        help="Flow-matching denoising steps per chunk (latency vs quality); "
-                             "0 keeps the checkpoint's value (10).")
+                        help="Denoising steps per chunk (latency vs quality); 0 keeps the "
+                             "checkpoint's default of 100 (~180 ms/chunk). Going lower "
+                             "costs accuracy under DDPM: 10 steps moved holdout MAE from "
+                             "5.66 to 6.27 on the shipped checkpoint.")
     parser.add_argument("--settle-tolerance", type=float, default=float(env_str("POLICY_SETTLE_TOLERANCE", "2.0")),
                         help="Max per-joint error to call the arm settled; <=0 disables the gate.")
     parser.add_argument("--settle-timeout", type=float, default=float(env_str("POLICY_SETTLE_TIMEOUT_S", "2.0")),

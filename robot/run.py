@@ -23,9 +23,10 @@ from livekit.portal import (
 from shared.common import env_str, load_env, mint_token, pace, required_env
 from shared.config import FPS
 from shared.leslider import CAMERAS, build_follower, split_state_frames
+from shared.operators import ROBOT
 from shared.rest_pose import RESET_POSE_DEFAULTS
 
-IDENTITY = "robot"
+IDENTITY = ROBOT
 CONFIG_PATH = pathlib.Path(__file__).resolve().parent.parent / "portal.yaml"
 
 logger = logging.getLogger(__name__)

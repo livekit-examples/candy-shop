@@ -18,7 +18,7 @@ from operators.teleoperator.common import user_config_dir
 
 logger = logging.getLogger(__name__)
 
-ACTIONS = ("record", "discard", "claim", "release")
+ACTIONS = ("record", "discard", "claim", "release", "resume", "mimic", "stop_all")
 
 DEFAULTS: dict[str, tuple[str, ...]] = {
     # `apostrophe` is here by default because it is what a common USB foot pedal
@@ -27,6 +27,13 @@ DEFAULTS: dict[str, tuple[str, ...]] = {
     "discard": ("left_bracket", "backspace"),
     "claim": ("c",),
     "release": (),
+    # Unbound by default, both because they move the rig: `resume` restarts whatever
+    # the claim preempted, and `stop_all` folds the arm. Bind them in Settings if you
+    # want them under a pedal.
+    "resume": (),
+    "stop_all": (),
+    # Only the leader arm moves, so this one is safe to leave on a letter.
+    "mimic": ("m",),
 }
 
 # ImGui key name -> the character it produces on a terminal, so stdin hotkeys

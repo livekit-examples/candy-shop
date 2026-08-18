@@ -54,6 +54,10 @@ train = [
 train-dit = [
     { include-group = "train" },
     "lerobot[multi_task_dit]==0.6.1",
+    # lerobot's trainer imports accelerate unconditionally, and neither the dataset nor
+    # the multi_task_dit extra brings it. Only a cluster built from scratch shows this:
+    # the long-lived dit boxes had it from an earlier pi05 venv.
+    "lerobot[training]==0.6.1",
 ]
 # operators/reward/skypilot.yaml: SARM's encoding processor imports faker (and the
 # rest of the sarm extra) at construction, so reward training needs it on top of
