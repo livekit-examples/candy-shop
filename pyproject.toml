@@ -12,7 +12,7 @@ dependencies = [
     # policy operator dies with "'diffusers' is required but not installed" -- and
     # get_policy_class("multi_task_dit") succeeds regardless, so the gap is not visible
     # until a checkpoint is actually loaded.
-    "lerobot[feetech,dataset,multi_task_dit]==0.6.1",
+    "lerobot[feetech,smolvla,dataset,multi_task_dit]==0.6.1",
     "lerobot_robot_so101_slider",
     "lerobot_teleoperator_so101_with_slider",
     "pynput>=1.7",          # teleoperator leader: arrow keys drive slider.vel
@@ -42,7 +42,7 @@ teleoperator-ui = "operators.teleoperator.ui.app:cli"
 # Training-only slice for operators/policy/skypilot.yaml: no serial/HID, camera or UI
 # deps, so a GPU box installs neither feetech nor imgui.
 train = [
-    "lerobot[dataset]==0.6.1",
+    "lerobot[smolvla,dataset]==0.6.1",
     "torch>=2.2",
     "torchvision",
     "numpy>=1.24",
