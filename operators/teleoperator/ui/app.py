@@ -339,8 +339,16 @@ def draw_banner(state: AppState) -> None:
     error = str(status.get("error") or "")
     notice = client.notice
 
+    leader = status.get("leader") or {}
     if busy:
         _banner(theme.BG_ACCENT2, theme.ACCENT1, f"{busy} — the corpus is being rewritten")
+    elif leader.get("port") and not leader.get("connected"):
+        # The rig stops moving the moment this happens, so it goes above everything but
+        # a rewrite: no actions reach the robot until the bus is back.
+        _banner(theme.BG_SERIOUS, theme.SERIOUS,
+                f"leader arm not answering on {leader.get('port')} — "
+                f"{leader.get('detail') or 'reconnecting'}. Recording is unaffected; "
+                f"nothing is being sent to the robot.")
     elif error:
         _banner(theme.BG_SERIOUS, theme.SERIOUS, error)
     elif notice:
@@ -570,6 +578,8 @@ def draw_arm(state: AppState, size: ImVec2) -> None:
 
     imgui.spacing()
     _draw_mimic(state, mimic)
+    imgui.spacing()
+    _draw_leader(state, status.get("leader") or {})
     imgui.end_child()
 
 
@@ -617,6 +627,63 @@ def _draw_mimic(state: AppState, mimic: dict[str, Any]) -> None:
         imgui.push_text_wrap_pos(0.0)
         with font(theme.FONTS.small):
             text(theme.SERIOUS if mimic_state == "error" else theme.FG4, detail)
+        imgui.pop_text_wrap_pos()
+
+
+# A leader link worth drawing. `open` isn't in here: it's the state that says nothing.
+LINK_LABELS = {
+    "reconnecting": ("reconnecting", theme.MODERATE),
+    "down": ("down", theme.SERIOUS),
+}
+
+
+def _draw_leader(state: AppState, leader: dict[str, Any]) -> None:
+    """The leader's own two moves: drop its torque, and re-open its bus.
+
+    Both belong next to mimic because mimic is what torques the arm and what a dead bus
+    takes down first. `Free leader` is deliberately not the mimic toggle: an engage that
+    failed halfway leaves the arm stiff with mimic already reporting off, and there the
+    toggle has nothing to switch off.
+    """
+    connected = bool(leader.get("connected"))
+    link = str(leader.get("state") or ("open" if connected else "down"))
+
+    style = imgui.get_style()
+    half = ImVec2((imgui.get_content_region_avail().x - style.item_spacing.x) / 2, 0)
+    imgui.begin_disabled(not connected)
+    if button_with_key("Free leader", _first_key(state, "relax"), half):
+        state.client.call(protocol.METHOD_RELAX)
+    imgui.end_disabled()
+    if imgui.is_item_hovered(imgui.HoveredFlags_.allow_when_disabled):
+        imgui.set_tooltip("Torque off, mimic off — the leader goes loose in your hand.\n"
+                          "Hold it first: an SO-101 drops under its own weight.")
+    imgui.same_line()
+    imgui.begin_disabled(not leader.get("port"))
+    if button_with_key("Reconnect", _first_key(state, "reconnect"), half):
+        state.client.call(protocol.METHOD_RECONNECT)
+    imgui.end_disabled()
+    if imgui.is_item_hovered(imgui.HoveredFlags_.allow_when_disabled):
+        imgui.set_tooltip("Re-open the leader's serial bus. A dropped link already\n"
+                          "retries itself; this tries now, once the cable is back in.\n"
+                          "The corpus stays open either way.")
+
+    # Only when it isn't simply open: a permanent green LINK row is furniture.
+    if link == "open":
+        return
+    label, colour = LINK_LABELS.get(link, (link, theme.FG1))
+    attempts = int(leader.get("attempts", 0) or 0)
+    with font(theme.FONTS.small):
+        text(theme.FG4, "LINK")
+    imgui.same_line(LABEL_WIDTH)
+    badge(label, colour, _chip_bg(colour), dot=link == "reconnecting")
+    if attempts:
+        imgui.same_line()
+        with font(theme.FONTS.mono_small):
+            text(theme.FG3, f"attempt {attempts}")
+    if detail := str(leader.get("detail") or ""):
+        imgui.push_text_wrap_pos(0.0)
+        with font(theme.FONTS.small):
+            text(theme.SERIOUS if link == "down" else theme.FG4, detail)
         imgui.pop_text_wrap_pos()
 
 
@@ -1545,6 +1612,12 @@ def handle_shortcuts(state: AppState) -> None:
     elif key_pressed(state, "mimic"):
         enabled = bool((status.get("mimic") or {}).get("enabled"))
         state.client.call(protocol.METHOD_MIMIC, {"enabled": not enabled})
+    elif key_pressed(state, "relax"):
+        if (status.get("leader") or {}).get("connected"):
+            state.client.call(protocol.METHOD_RELAX)
+    elif key_pressed(state, "reconnect"):
+        if (status.get("leader") or {}).get("port"):
+            state.client.call(protocol.METHOD_RECONNECT)
     elif key_pressed(state, "stop_all"):
         state.client.call(protocol.METHOD_PEER_STOP)
 

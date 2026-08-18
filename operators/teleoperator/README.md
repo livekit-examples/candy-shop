@@ -47,13 +47,16 @@ Terminal (recorder must have focus) and the review window share the same
 | discard episode | `[` / backspace | |
 | take / release arm | `c` | one key both ways; taking it stops every operator first |
 | mimic toggle | `m` | only the leader moves, so it keeps a letter |
+| free the leader | `f` | torque off, mimic off — hold the arm first, it drops |
+| reconnect the leader | *(unbound)* | re-opens the serial bus; a dropped link already retries itself |
 | resume | *(unbound)* | restarts what taking the arm interrupted — it moves the rig |
 | stop everything | *(unbound)* | preempts every operator, then folds the arm |
 | set task | `t` (terminal only) | refused while recording |
 | quit | `x` (terminal only) | |
 
 Rebind in the window's Settings, or per-action via `TELEOPERATOR_KEYS_<ACTION>`
-(`RECORD`, `DISCARD`, `CLAIM`, `RELEASE`, `RESUME`, `MIMIC`, `STOP_ALL`) —
+(`RECORD`, `DISCARD`, `CLAIM`, `RELEASE`, `RESUME`, `MIMIC`, `RELAX`, `RECONNECT`,
+`STOP_ALL`) —
 comma-separated imgui key names, e.g. `TELEOPERATOR_KEYS_RECORD=r,space,apostrophe`.
 `resume` and `stop_all` ship unbound on purpose: a stray keystroke that restarts a
 policy or folds the arm is worse than a mouse trip to the window.
@@ -99,6 +102,19 @@ held for `TELEOP_MIMIC_HOLD_S` is read as a hand, and the teleoperator stops eve
 and claims. That path frees the leader outright, because the push *is* the proof a hand
 is on it.
 
+Not every gap is a hand, and the two are separated on purpose. A servo chasing a moving
+goal runs behind it, so the gap is measured against the goal from `TELEOP_MIMIC_LAG_S`
+ago — the one the leader has had time to reach — and a joint travelling *towards* its
+goal is not counted at all, however far behind it is. Without that, a policy motion
+faster than the leader can follow reads as a push and takes the arm mid-pick. If a hand
+resting on the trigger still trips it as the gripper closes, `TELEOP_MIMIC_INTERVENE_GRIPPER=0`
+takes the gripper out of push detection and leaves the five arm joints doing it.
+
+**Free the leader** (`f`, or the window's button) drops torque and switches mimic off in
+one move. The toggle does that too, but not in the case that needs it: an engage that
+failed halfway leaves the arm stiff with mimic already reporting `error`, and there the
+toggle has nothing to switch off. Hold the leader before pressing it.
+
 Every other way of taking the arm **holds** the leader instead: torque stays on and the
 goal stops following the robot, which parks the arm at that pose. That is deliberate —
 an SO-101 leader nobody is holding falls under gravity, and a claimed teleoperator sends
@@ -106,7 +122,23 @@ the follower down with it. Hold the leader, then switch mimic off to fly.
 
 `TELEOP_MIMIC_TORQUE_LIMIT` (per mille) is how hard the leader holds itself: the default
 500 is enough to carry its own weight and still yield to a firm hand, so a push registers
-without a fight.
+without a fight. It also caps how fast the leader can follow — raise it if tracking a
+brisk policy visibly falls behind, lower it if the arm fights your hand.
+
+## When the leader drops out
+
+The leader is one USB cable, and a bus that stops answering used to end the process and
+the in-flight episode with it. Now it is a reconnect: the handle is dropped, mimic
+forgets everything it believed about it (no writes to a port that isn't there), and a
+worker re-opens the port — 1s, 2s, 4s, 8s, then every 15s for as long as it takes.
+Everything else stays up, including the open corpus and any episode you were recording.
+
+The window shows this as a banner plus a `LINK` row in arm control, and **Reconnect**
+jumps the backoff once the cable is back in. Mimic comes back **off**: re-arming it
+torques the leader, and that is your call once the arm is in your hand again.
+
+The same path covers a leader that is up but misbehaving — Reconnect cycles the bus —
+and it is what recovers a failed torque write, which is a dead link by another name.
 
 ## Configuration
 
@@ -124,6 +156,8 @@ dataset to open immediately):
 | `TELEOP_MIMIC_INTERVENE_DEG` | `10` | leader-vs-goal gap that counts as a push; `0` disables it |
 | `TELEOP_MIMIC_INTERVENE_GRIPPER` | `20` | the same threshold on the gripper's 0-100 travel |
 | `TELEOP_MIMIC_HOLD_S` | `0.2` | how long that gap must hold before the arm changes hands |
+| `TELEOP_MIMIC_LAG_S` | `0.25` | how stale a goal a push is judged against — the leader's own follow lag |
+| `TELEOP_MIMIC_SMOOTH_S` | `0.08` | low-pass on the leader's goal; raise if tracking looks jittery |
 | `TELEOP_MIMIC_TORQUE_LIMIT` | `500` | leader holding torque, per mille; `0` leaves the motor's own |
 | `DATASET_REPO_ID` | `binhpham/candy-shop` | corpus id (`org/name`) |
 | `DATASET_ROOT` | `$HF_LEROBOT_HOME/<repo-id>` | where the corpus is written |

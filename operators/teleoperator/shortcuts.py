@@ -18,7 +18,8 @@ from operators.teleoperator.common import user_config_dir
 
 logger = logging.getLogger(__name__)
 
-ACTIONS = ("record", "discard", "claim", "release", "resume", "mimic", "stop_all")
+ACTIONS = ("record", "discard", "claim", "release", "resume", "mimic", "relax",
+           "reconnect", "stop_all")
 
 DEFAULTS: dict[str, tuple[str, ...]] = {
     # `apostrophe` is here by default because it is what a common USB foot pedal
@@ -32,8 +33,13 @@ DEFAULTS: dict[str, tuple[str, ...]] = {
     # want them under a pedal.
     "resume": (),
     "stop_all": (),
-    # Only the leader arm moves, so this one is safe to leave on a letter.
+    # Only the leader arm moves, so these are safe to leave on a letter.
     "mimic": ("m",),
+    # `f` for free: torque off, mimic off. Bound by default because a stiff leader is
+    # something you want out of your hand now, not after finding the window.
+    "relax": ("f",),
+    # Unbound: a dropped link retries itself, so this is only ever "try now".
+    "reconnect": (),
 }
 
 # ImGui key name -> the character it produces on a terminal, so stdin hotkeys
