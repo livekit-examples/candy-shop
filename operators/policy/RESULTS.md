@@ -28,6 +28,36 @@ trains its CLIP vision encoder at 0.1x LR while keeping the text encoder frozen,
 the capability neither pi0.5 configuration had. lerobot's own docs list this failure under
 "Executing the Wrong Task" and "Multiple similar tasks".
 
+## Diffusion, not flow matching (2026-08-17)
+
+`multi_task_dit` trains either objective. Flow matching won every offline comparison and
+lost on the arm, so serving now refuses a flow checkpoint outright.
+
+| | holdout MAE | chunk latency |
+|---|---|---|
+| `dit-orig@7500` diffusion, 100 steps | **5.66** | 179 ms |
+| `dit-orig@7500` diffusion, DDIM @ 10 | 6.27 | 27 ms |
+| `dit-lr1e4@5000` diffusion, 100 steps | 6.01 | 179 ms |
+| `dit-flow@5000` flow matching, 10 steps | 6.10 | 28 ms |
+| `dit-flow@5000` flow matching, 4 steps | 5.82 | **17 ms** |
+
+At matched training steps flow beat diffusion on both axes -- 5.82 against 6.01, and 10x
+faster -- because flow matching integrates accurately in a handful of Euler steps while
+truncating DDPM's 100-step schedule costs real accuracy (5.66 -> 6.27 at 10 steps). On
+the arm it picked the wrong candy anyway. Diffusion did not.
+
+That is the same blind spot as everything below: holdout MAE averages over five tasks and
+six joints, so it cannot see *which bin* the gripper goes to, which is the only thing that
+distinguishes these models. One detail did survive as a hint -- flow was consistently
+worse on joint index 2 (10.4-11.6 against diffusion's 7.6-8.6) while equal or better on
+the other five -- but a single localised regression was not enough to call it, and I did
+not.
+
+Also worth keeping: eval loss is not comparable across objectives. Flow's 0.0616 against
+diffusion's 0.0229 at step 2500 reflects different targets (velocity vs sampled noise) and
+different timestep sampling, not model quality. Only the holdout MAE above, in joint
+units, is comparable -- and it was still wrong.
+
 ## Every offline metric here was wrong
 
 Recorded because it cost days. Not one of the metrics below predicted robot behaviour:

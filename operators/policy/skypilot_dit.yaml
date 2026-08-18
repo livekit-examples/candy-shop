@@ -1,7 +1,6 @@
 # Train the multitask DiT policy on candy-shop — 8x H100.
 #
 #   sky launch -c dit operators/policy/skypilot_dit.yaml
-#   sky launch -c ditfm operators/policy/skypilot_dit.yaml --env OBJECTIVE_ARGS="..."
 #
 # Why this and not pi0.5: the arm picks the wrong candy. Five of our tasks differ only
 # by the instruction ("pick up a twix" vs "pick up a nerd"), and a language probe on the
@@ -89,9 +88,12 @@ envs:
   # Tuning range they give is 1e-5 to 3e-4.
   LR: "3e-4"
 
-  # Diffusion is the objective their published 90.6% LIBERO result used. Override for
-  # the flow-matching arm; beta timestep sampling is their recommendation there
-  # ("performance appears much better in practice").
+  # Diffusion, and not overridable: this is the objective their published 90.6% LIBERO
+  # result used, and the one that works here. The flow-matching arm (dit-flow) looked
+  # better on every offline number -- equal holdout MAE at matched steps, and accuracy
+  # held down to 4 integration steps, i.e. 17 ms per chunk against diffusion's 180 ms at
+  # 100 -- and then picked the wrong candy on the arm. Diffusion did not. Serving
+  # refuses a flow checkpoint outright (operators/policy/dit.py).
   OBJECTIVE_ARGS: "--policy.objective=diffusion --policy.noise_scheduler_type=DDPM --policy.num_train_timesteps=100"
 
   # Geometric and luminance augmentation only. The LIBERO example also jitters hue and
