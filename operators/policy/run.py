@@ -287,6 +287,12 @@ class PolicyRunner:
             self._reprime = False  # the _goto_start below is the priming for this task
             self._stop.clear()
             self._settle.reset()
+            # Actions left over from the previous run are absolute poses from the middle
+            # of that episode. _infer pops before it plans, so an uncleared queue makes
+            # the arm ramp to START_POSE and then immediately jump to wherever the last
+            # run happened to stop. policy.reset() does not cover this -- chunking lives
+            # here, not in the policy (see _replan_pending).
+            self._chunk.clear()
             await self._op.set_active_operator(self._op.local_identity())
             self._policy.reset()
             self._pre.reset()

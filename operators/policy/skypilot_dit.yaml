@@ -41,8 +41,17 @@ resources:
 envs:
   CHECKPOINT_BUCKET: candy-shop
   RUN_NAME: dit-candy
-  DATASET_SRC: /outputs/datasets/candy-train-abs
+  # The raw recording, holdout included; the run below carves the holdout out. Pulled
+  # from the Hub rather than the bucket so a fresh recording session only has to push
+  # once, from wherever the teleoperator wrote it.
+  DATASET_HF_REPO: binhpham/candy-shop
   DATASET_REPO_ID: binhpham/candy-shop-train
+
+  # The pre-registered holdout, carved off the raw 500-episode dataset before any
+  # curation and kept fixed since. Every episode recorded after that is training data,
+  # so these indices stay valid as the dataset grows -- which is the point: hold it
+  # constant and today's numbers stay comparable with every earlier run.
+  HOLDOUT_EPISODES: "[0,10,20,30,40,50,60,70,80,90,99,108,111,121,131,141,151,161,168,178,188,198,208,218,234,243,252,261,270,279,285,295,305,315,325,339,349,355,365,378,400,410,420,430,440,450,460,470,480,490]"
 
   # One process, so this IS the effective batch. lerobot's trainer has no gradient
   # accumulation, so a single GPU cannot reach the recommended 256-320: CLIP encodes
@@ -53,12 +62,13 @@ envs:
   BATCH_SIZE: 160
   NUM_PROCESSES: 1
 
-  # Their LIBERO run was 100k steps x batch 320 = 32M samples over a large multi-task
-  # suite, i.e. tens of epochs. Copying the step count instead of the epoch count is the
-  # same error as porting the folding blog's 200k pi0.5 steps: 60k x 160 here would be
-  # 9.6M samples over 83,405 frames = 115 epochs, several times their reference. 30k is
-  # ~58 epochs, inside their range. Eval every 2500 steps decides where to actually stop.
-  STEPS: 30000
+  # Count epochs, not steps: their LIBERO run was 100k x batch 320 over a large
+  # multi-task suite, and copying the step count is the same error as porting the folding
+  # blog's 200k pi0.5 steps. The training split is now ~129k frames (704 recorded, 50
+  # held out), so 24k x 160 = 3.8M samples is ~30 epochs. The checkpoint that works on
+  # the arm came from 14 epochs, which lands near step 11.5k here -- so this brackets it
+  # roughly 2x either side. Eval every 2500 decides where to actually stop.
+  STEPS: 24000
   SAVE_FREQ: 2500
   EVAL_STEPS: 2500
   EVAL_SPLIT: "0.05"
@@ -125,8 +135,13 @@ run: |
   export HF_HUB_DISABLE_XET=1
 
   mkdir -p ~/data
-  rm -rf ~/data/candy-train
-  cp -r "$DATASET_SRC" ~/data/candy-train
+  rm -rf ~/data/candy-raw ~/data/candy-train
+  uv run --only-group train-dit hf download "$DATASET_HF_REPO" --repo-type dataset \
+    --local-dir ~/data/candy-raw
+  uv run --only-group train-dit lerobot-edit-dataset \
+    --repo_id "$DATASET_HF_REPO" --root ~/data/candy-raw \
+    --new_repo_id "$DATASET_REPO_ID" --new_root ~/data/candy-train \
+    --operation.type delete_episodes --operation.episode_indices "$HOLDOUT_EPISODES"
 
   uv run --only-group train-dit python -m operators.policy.train \
     --policy.type=multi_task_dit \
