@@ -443,6 +443,10 @@ def _set_inference_steps(policy, num_steps: int) -> None:
 def _load_policy(checkpoint: str, device: str, num_steps: int):
     """Load the checkpoint, wire its normalizer, and build the processors."""
     config_path = pathlib.Path(checkpoint) / "config.json"
+    # Build the class the checkpoint names, not a fixed one: this operator serves both
+    # architectures, and instantiating the wrong class does not fail cleanly -- a DiT
+    # config handed to SmolVLAPolicy dies deep in init on a missing `rtc_config`.
+    policy_type = POLICY_TYPE
     if config_path.is_file():
         policy_type = json.loads(config_path.read_text()).get("type")
         if policy_type not in SERVABLE_TYPES:
@@ -452,7 +456,7 @@ def _load_policy(checkpoint: str, device: str, num_steps: int):
             )
 
     logger.info("[policy] loading %s (downloads the CLIP encoders on first run)...", checkpoint)
-    policy = get_policy_class(POLICY_TYPE).from_pretrained(checkpoint)
+    policy = get_policy_class(policy_type).from_pretrained(checkpoint)
     policy.config.device = device
     if num_steps > 0:
         _set_inference_steps(policy, num_steps)
