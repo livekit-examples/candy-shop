@@ -104,9 +104,11 @@ SPECS: tuple[OperatorSpec, ...] = (
         argument=Field(label="Prompt", kind="text", default="pick up the candy",
                        presets=PROMPT_PRESETS),
         # `run_policy` returns only when preempted, so this bounds a whole picking
-        # session rather than one call. Generous: on expiry we lose track of a policy
-        # that is still driving the arm.
-        run_timeout_s=900.0,
+        # session rather than one call — and with mimic on, a session is however long the
+        # human supervises it. An hour, because expiry is the bad outcome: the policy
+        # keeps driving the arm while this side forgets it was running, so the card reads
+        # idle and the next claim has nothing to resume.
+        run_timeout_s=3600.0,
     ),
     OperatorSpec(
         identity=MOVE_TO,

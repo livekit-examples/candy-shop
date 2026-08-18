@@ -229,11 +229,19 @@ class PeerControl:
         stopped: list[str] = []
         suspended: list[tuple[str, str]] = []
         online = set(self.online())
+        active = self._op.active_operator()
         for identity in roster.STOP_ORDER:
             if identity not in online:
                 continue
             state = self._states.get(identity)
-            if remember and state is not None and state.running:
+            # `running` is our own view, and it drops the moment the run RPC gives up —
+            # which for a policy is a wait long enough to expire under the human rather
+            # than the work ending. Holding the robot's pointer says it is still going,
+            # so a run of ours whose reply we lost is still worth remembering. Only ours:
+            # a payload is the proof we started it, and resuming someone else's task on a
+            # blank prompt would pick the wrong candy.
+            if remember and state is not None and (
+                    state.running or (identity == active and state.payload)):
                 suspended.append((identity, state.payload))
             if await self.stop(identity) is None:
                 stopped.append(identity)

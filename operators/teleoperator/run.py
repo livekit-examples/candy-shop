@@ -3,7 +3,7 @@
 Also the room's control desk: it discovers the other operators (move-to, policy,
 reward), drives them over their own RPCs, preempts them to take the arm, and hands it
 back — see ``peers``. ``mimic`` drives the *leader* from the follower's pose while one of
-them has the arm, so a takeover mid-policy is a handover rather than a jump.
+them has the arm, so claiming mid-policy is a handover rather than a jump.
 
 The review UI (``teleoperator-ui``) is a separate process driving this one over
 ``protocol``'s RPCs, so its repaints/crashes can't stall a recording. Run:
@@ -493,10 +493,6 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
     mimic = MimicController(
         fps=fps,
         align_s=float(env("TELEOP_MIMIC_ALIGN_S", "1.5")),
-        intervene_deg=float(env("TELEOP_MIMIC_INTERVENE_DEG", "10")),
-        intervene_gripper=float(env("TELEOP_MIMIC_INTERVENE_GRIPPER", "20")),
-        intervene_hold_s=float(env("TELEOP_MIMIC_HOLD_S", "0.2")),
-        follow_lag_s=float(env("TELEOP_MIMIC_LAG_S", "0.25")),
         smooth_s=float(env("TELEOP_MIMIC_SMOOTH_S", "0.08")),
         torque_limit=int(env("TELEOP_MIMIC_TORQUE_LIMIT", "500")),
     )
@@ -670,14 +666,15 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
         """
         asyncio.create_task(coro, name=label)
 
-    async def take_arm(reason: str, *, free_leader: bool) -> list[str]:
-        """Claim the arm: hand the leader over, preempt every peer, hold the pointer.
+    async def take_arm(reason: str) -> list[str]:
+        """Claim the arm: free the leader, preempt every peer, hold the pointer.
 
-        `free_leader` drops the leader's torque, which is only safe when a hand is
-        already on it — see `mimic`. Everything else holds the leader at its pose, which
-        parks the robot there until the human is ready.
+        Taking the arm is a human stepping into whatever was running, so the leader goes
+        slack first and stays slack — a torqued leader is one you have to fight to fly.
+        The flip side is that claiming means a hand on the leader: nothing holds it up
+        once torque is off, and the robot follows it down. See `mimic`.
         """
-        mimic.handover(rt.leader, free=free_leader)
+        mimic.yield_to_human(rt.leader)
         suspended = await control.claim(op.local_identity())
         print(f"[teleoperator] arm claimed ({reason})"
               + (f"; suspended {', '.join(suspended)} — resume restarts it"
@@ -704,15 +701,6 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
         print(f"[teleoperator] stop all ({reason}): {', '.join(stopped) or 'nothing'}"
               f"{f'; fold failed: {folded}' if folded else '; arm folded'}")
         return stopped, folded
-
-    def on_intervene(joint: str) -> None:
-        """The human pushed the mimicking leader: give them the arm.
-
-        The push *is* the hand on the leader, so this is the one takeover that may free
-        it outright.
-        """
-        print(f"[teleoperator] leader pushed ({joint}) — taking the arm")
-        fire(take_arm(f"push on {joint}", free_leader=True), "intervene")
 
     # --- RPC surface (see protocol) -----------------------------------------
     # Handlers run on the asyncio loop, so each is O(1) or hands off.
@@ -899,7 +887,7 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
         return reply(task=task)
 
     async def rpc_claim(data: RpcInvocationData) -> str:
-        suspended = await take_arm(f"claimed by '{data.caller_identity}'", free_leader=False)
+        suspended = await take_arm(f"claimed by '{data.caller_identity}'")
         return reply(active=op.local_identity(), suspended=suspended)
 
     async def rpc_release(data: RpcInvocationData) -> str:
@@ -1078,7 +1066,7 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
                     # One key, both directions: holding the arm and pressing it again
                     # gives it back, which is what `c` did before as a ring of one.
                     fire(release_arm("hotkey") if control.claiming
-                         else take_arm("hotkey", free_leader=False), "claim-key")
+                         else take_arm("hotkey"), "claim-key")
                 elif key in key_release:
                     fire(release_arm("hotkey"), "release-key")
                 elif key in key_resume:
@@ -1158,9 +1146,6 @@ async def main(*, with_ui: Optional[bool] = None) -> None:
                     # Uncaught this ended the process, discarding the in-flight episode.
                     lost_leader(f"reading the leader failed: {exc}")
                 else:
-                    # Push detection before the next goal is written, so the leader's
-                    # position is judged against the goal that was actually in force.
-                    mimic.check_push(action, on_intervene)
                     # Mimic only makes sense while somebody else drives: the leader can't
                     # be driven and be doing the driving at the same time.
                     #

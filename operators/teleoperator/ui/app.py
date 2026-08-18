@@ -554,8 +554,8 @@ def draw_arm(state: AppState, size: ImVec2) -> None:
     imgui.end_disabled()
     if imgui.is_item_hovered(imgui.HoveredFlags_.allow_when_disabled):
         imgui.set_tooltip("Stop every operator, then point the robot at this leader.\n"
-                          "With mimic on, the leader is held at the arm's pose — hold it\n"
-                          "and switch mimic off to fly.")
+                          "With mimic on, the leader goes slack at the arm's pose and is\n"
+                          "yours to fly — so have a hand on it before you take the arm.")
     imgui.same_line()
     imgui.begin_disabled(active is None and not claiming)
     if button_with_key("Release", _first_key(state, "release"), half):
@@ -590,12 +590,13 @@ MIMIC_LABELS = {
     "aligning": ("aligning", theme.ACCENT1),
     "tracking": ("tracking", theme.ACCENT1),
     "holding": ("holding", theme.MODERATE),
+    "yielded": ("yours", theme.ACCENT1),
     "error": ("error", theme.SERIOUS),
 }
 
 
 def _draw_mimic(state: AppState, mimic: dict[str, Any]) -> None:
-    """The mimic toggle: the leader mirrors the arm, and a push on it takes over."""
+    """The mimic toggle: the leader mirrors the arm so a takeover is not a jump."""
     enabled = bool(mimic.get("enabled"))
     mimic_state = str(mimic.get("state") or "off")
 
@@ -604,26 +605,16 @@ def _draw_mimic(state: AppState, mimic: dict[str, Any]) -> None:
     if imgui.is_item_hovered():
         imgui.set_tooltip("Drive the leader from the follower's pose while another "
                           "operator has\nthe arm, so you feel the policy and can take "
-                          "over without a jump.\nPush the leader to take the arm.")
+                          "over without a jump.\nTake arm goes slack in your hand; "
+                          "nothing else takes it.")
 
     label, colour = MIMIC_LABELS.get(mimic_state, (mimic_state, theme.FG1))
     with font(theme.FONTS.small):
         text(theme.FG4, "STATE")
     imgui.same_line(LABEL_WIDTH)
     badge(label, colour, _chip_bg(colour), dot=mimic_state in ("aligning", "tracking"))
-    if mimic_state == "tracking":
-        # How close the leader is to the push that would take the arm: the one number
-        # worth watching while a policy runs.
-        gap = float(mimic.get("error_deg") or 0.0)
-        limit = float(mimic.get("intervene_deg") or 0.0)
-        imgui.same_line()
-        with font(theme.FONTS.mono_small):
-            text(theme.ACCENT1 if limit and gap > limit * 0.5 else theme.FG3,
-                 f"push {gap:.1f} / {limit:.0f} deg" if limit else f"push {gap:.1f} deg")
 
-    # Only where it says something to act on: while tracking, the number above is the
-    # whole story and a permanent hint would just be furniture.
-    if mimic_state != "tracking" and (detail := str(mimic.get("detail") or "")):
+    if detail := str(mimic.get("detail") or ""):
         imgui.push_text_wrap_pos(0.0)
         with font(theme.FONTS.small):
             text(theme.SERIOUS if mimic_state == "error" else theme.FG4, detail)
