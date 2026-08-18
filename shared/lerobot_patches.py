@@ -197,3 +197,29 @@ def enable_relative_actions(exclude_joints: tuple[str, ...] = ()) -> None:
 
     with_relative_actions._relative = True
     module.make_multi_task_dit_pre_post_processors = with_relative_actions
+
+
+def drop_slider_vel() -> None:
+    """Train on the six arm ``.pos`` only, slicing ``slider.vel`` out of the dataset.
+
+    The leslider wire contract carries a 7th ``slider.vel`` field, but the slider belongs
+    to the ``move_to`` operator: the policy never commands it, and ``run.py`` pins it to 0
+    at inference. SmolVLA dropped it end to end through
+    :class:`~operators.policy.smolvla.SliderDroppedDataset`; the multi_task_dit path was
+    built without that step and trained on all seven columns, so every DiT checkpoint so
+    far carries a dimension that is constant 0 throughout the dataset. Harmless -- the
+    model learns to emit 0 and nothing reads it -- but it is a shape nobody asked for, and
+    it means DiT and SmolVLA checkpoints need different-width observations at serving.
+
+    lerobot's trainer builds its own dataset, so the swap happens at the class the factory
+    instantiates rather than at a call site. Both the train and eval halves of an
+    ``eval_split`` run come from there, so both get sliced.
+    """
+    from lerobot.datasets import factory
+
+    from operators.policy.smolvla import SliderDroppedDataset
+
+    if factory.LeRobotDataset is SliderDroppedDataset:
+        return
+    factory.LeRobotDataset = SliderDroppedDataset
+    logger.info("[patches] dropping slider.vel: policy trains on the six arm .pos")

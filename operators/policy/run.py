@@ -43,19 +43,18 @@ from lerobot.utils.constants import OBS_STATE
 from shared.common import env_str, load_env, mint_token, pace, required_env
 from shared.config import FPS
 from shared.operators import POLICY
-from shared.rest_pose import ARM_POS_KEYS, RESET_POSE_DEFAULTS, SLIDER_VEL_KEY
+from shared.rest_pose import ALL_ACTION_KEYS, ARM_POS_KEYS, RESET_POSE_DEFAULTS, SLIDER_VEL_KEY
 
 import cv2
 
 from operators.policy.settle import SettleGate
-from operators.policy.dit import (
-    ACTION_NAMES,
-    OBJECTIVE,
-    POLICY_TYPE,
-    STATE_NAMES,
-    expected_image_hw,
-    resolve_camera_map,
-)
+from operators.policy.smolvla import ACTION_NAMES, POLICY_TYPE, resolve_camera_map
+
+# SmolVLA is what this serves by default, but _infer keeps the queue-based branch a DiT
+# checkpoint needs, so both load. Worth keeping: the two are the only architectures that
+# have ever picked the right candy on this arm, and comparing them means serving both
+# from one operator rather than swapping code between tests.
+SERVABLE_TYPES = frozenset({POLICY_TYPE, "multi_task_dit"})
 
 IDENTITY = POLICY
 CONFIG_PATH = pathlib.Path(__file__).resolve().parent.parent.parent / "portal.yaml"
@@ -108,6 +107,7 @@ class PolicyRunner:
     def __init__(self, op: Operator, *, fps: int, device: str, duration_s: float,
                  policy, preprocessor, postprocessor, camera_for_key: dict[str, str],
                  image_hw: dict[str, tuple[int, int]] | None = None,
+                 state_names: tuple[str, ...],
                  settle_tolerance: float, settle_timeout_s: float,
                  start_ramp_s: float = 2.0, start_tolerance: float = 3.0,
                  on_tick: Callable[[dict], None] | None = None) -> None:
@@ -119,6 +119,7 @@ class PolicyRunner:
         self._pre = preprocessor
         self._post = postprocessor
         self._camera_for_key = camera_for_key  # policy image key -> physical camera name
+        self._state_names = state_names  # 6 or 7 wide, per the checkpoint
         self._image_hw = image_hw or {}  # policy image key -> (h, w) it was trained at
         self._settle = SettleGate(
             keys=ARM_POS_KEYS, tolerance=settle_tolerance, timeout_s=settle_timeout_s
@@ -184,13 +185,29 @@ class PolicyRunner:
 
     @torch.inference_mode()
     def _infer(self, state_vec: np.ndarray, images: dict[str, np.ndarray], task: str) -> torch.Tensor:
-        """One policy step, served from a locally held chunk of absolute actions.
+        """One policy step, served from a locally held chunk of *absolute* actions.
 
-        DiT keeps observation deques (``n_obs_steps`` frames of history) that only
-        ``select_action`` fills, so ``predict_action_chunk`` cannot be called directly --
-        it raises "stack expects a non-empty TensorList" on a fresh policy. Drive it the
-        way it expects: the first call generates a chunk, the remaining ``n_action_steps``
-        calls dequeue from it without re-running the model.
+        Chunking is ours rather than ``select_action``'s because of how relative actions
+        are undone. ``RelativeActionsProcessorStep`` caches the state it last saw and the
+        paired ``AbsoluteActionsProcessorStep`` adds that cache back, so the pair is only
+        correct when postprocessing happens against the same observation that produced
+        the prediction. Driving the policy's own queue would call the preprocessor every
+        tick while the model only ran every n_action_steps::
+
+            tick 1  pre(obs@t1) caches t1 -> model runs -> chunk relative to t1
+                    post(action[0]) adds t1                          correct
+            tick 2  pre(obs@t2) caches t2 -> queue pops action[1]
+                    post(action[1]) adds t2                          wrong, wants t1
+
+        Every action after the first would be referenced to the wrong pose, silently:
+        nothing raises, the arm just tracks a distorted trajectory. Predicting and
+        postprocessing the whole chunk while the cache still holds the right state fixes
+        it -- ``to_absolute_actions`` takes (B, T, action_dim) and broadcasts the state
+        across time for exactly this.
+
+        Absolute-action checkpoints are unaffected either way: their unnormalize is
+        elementwise and the absolute step is disabled, so per-chunk and per-action give
+        the same numbers.
         """
         if self._chunk:
             return self._chunk.popleft()
@@ -200,10 +217,22 @@ class PolicyRunner:
         observation = prepare_observation_for_inference(observation, self._device, task, robot_type="")
         observation = self._pre(observation)
 
-        self._policy.reset()
-        for _ in range(getattr(self._policy.config, "n_action_steps", 1)):
-            action = self._policy.select_action(dict(observation))
-            self._chunk.append(self._post(action).squeeze(0).cpu())
+        horizon = getattr(self._policy.config, "n_action_steps", 1)
+        if getattr(self._policy, "_queues", None) is not None:
+            # A queue-based policy (multi_task_dit) keeps observation deques that only
+            # `select_action` fills, so predict_action_chunk raises "stack expects a
+            # non-empty TensorList" on it. Kept so a DiT checkpoint still serves.
+            self._policy.reset()
+            for _ in range(horizon):
+                action = self._policy.select_action(dict(observation))
+                self._chunk.append(self._post(action).squeeze(0).cpu())
+            return self._chunk.popleft()
+
+        chunk = self._policy.predict_action_chunk(observation)
+        chunk = self._post(chunk)
+        # [1, T, action_dim] -> T tensors of [action_dim]. Only the first n_action_steps
+        # are executed; the model may predict a longer chunk_size than it commits to.
+        self._chunk.extend(chunk.squeeze(0)[:horizon].cpu())
         return self._chunk.popleft()
 
     def _send_arm(self, slider_vel: float) -> None:
@@ -341,10 +370,11 @@ class PolicyRunner:
                     continue
 
                 obs_ts = self._obs_ts_us
-                # Seven wide, including slider.vel: see STATE_NAMES. Default it to 0
-                # rather than requiring it — `ready` gates on the arm keys only, and 0
-                # is what the column held for nearly every frame pi0 trained on.
-                state_vec = np.array([self._state.get(key, 0.0) for key in STATE_NAMES], dtype=np.float32)
+                # Width follows the checkpoint (see state_names_for). slider.vel defaults
+                # to 0 rather than being required: `ready` gates on the arm keys only, and
+                # 0 is the only value that column ever held.
+                state_vec = np.array([self._state.get(key, 0.0) for key in self._state_names],
+                                     dtype=np.float32)
                 images = {key: self._resize_for(key, self._frames[cam])
                           for key, cam in self._camera_for_key.items()}
 
@@ -379,36 +409,46 @@ class PolicyRunner:
         return {"task": self._task, "reason": reason, "ticks": ticks, "elapsed_s": elapsed}
 
 
-def _set_inference_steps(policy, num_steps: int) -> None:
-    """Set the sampler's step count.
+def state_names_for(policy) -> tuple[str, ...]:
+    """The state keys this checkpoint expects, in wire order.
 
-    ``DiffusionObjective`` copies ``num_inference_steps`` off the config at
-    construction, so the config field is inert afterwards and only the objective's own
-    attribute is read at sampling time. Writing the config one raises nothing and
-    changes nothing -- it just serves at the checkpoint's default (100 steps, ~180 ms
-    per chunk) while ``--num-steps`` says otherwise.
+    SmolVLA is six wide: SliderDroppedDataset sliced slider.vel out at training time.
+    The multi_task_dit runs trained on the raw dataset and are seven wide, carrying a
+    slider.vel column that is constant 0 throughout -- inert, but it has to be fed or the
+    state tensor is the wrong shape. Read the width off the checkpoint rather than
+    hardcoding either, so both serve from one operator.
     """
-    policy.objective.num_inference_steps = num_steps
+    features = getattr(policy.config, "input_features", None) or {}
+    feature = features.get(OBS_STATE)
+    width = int(getattr(feature, "shape", [len(ARM_POS_KEYS)])[0]) if feature is not None else len(ARM_POS_KEYS)
+    if width == len(ALL_ACTION_KEYS):
+        return ALL_ACTION_KEYS
+    if width != len(ARM_POS_KEYS):
+        logger.warning("[policy] checkpoint wants a %d-wide state; feeding the %d arm keys",
+                       width, len(ARM_POS_KEYS))
+    return ARM_POS_KEYS
+
+
+def _set_inference_steps(policy, num_steps: int) -> None:
+    """Set the flow-matching step count.
+
+    SmolVLA reads ``num_steps`` off its config at sampling time, so setting it here
+    takes effect. (multi_task_dit did not: its objective copied the value at
+    construction and ignored the config afterwards, which made ``--num-steps`` a silent
+    no-op. Kept as a helper so the difference stays in one place.)
+    """
+    policy.config.num_steps = num_steps
 
 
 def _load_policy(checkpoint: str, device: str, num_steps: int):
     """Load the checkpoint, wire its normalizer, and build the processors."""
     config_path = pathlib.Path(checkpoint) / "config.json"
     if config_path.is_file():
-        saved = json.loads(config_path.read_text())
-        policy_type = saved.get("type")
-        if policy_type != POLICY_TYPE:
+        policy_type = json.loads(config_path.read_text()).get("type")
+        if policy_type not in SERVABLE_TYPES:
             raise RuntimeError(
                 f"{checkpoint} is a {policy_type!r} checkpoint; this operator serves "
-                f"{POLICY_TYPE!r} only. See operators/policy/RESULTS.md."
-            )
-        objective = saved.get("objective")
-        if objective != OBJECTIVE:
-            raise RuntimeError(
-                f"{checkpoint} was trained with objective={objective!r}; this operator "
-                f"serves {OBJECTIVE!r} only. On the arm, diffusion picked the right "
-                "candy and flow matching did not, despite flow scoring better offline. "
-                "See operators/policy/RESULTS.md."
+                f"{sorted(SERVABLE_TYPES)}. See operators/policy/RESULTS.md."
             )
 
     logger.info("[policy] loading %s (downloads the CLIP encoders on first run)...", checkpoint)
@@ -473,8 +513,7 @@ def build_runner(op: Operator, args: argparse.Namespace,
     return PolicyRunner(
         op, fps=FPS, device=args.device, duration_s=args.duration,
         policy=policy, preprocessor=preprocessor, postprocessor=postprocessor,
-        camera_for_key=camera_for_key,
-        image_hw=expected_image_hw(policy.config),
+        camera_for_key=camera_for_key, state_names=state_names_for(policy),
         settle_tolerance=args.settle_tolerance, settle_timeout_s=args.settle_timeout,
         start_ramp_s=args.start_ramp, start_tolerance=args.start_tolerance,
         on_tick=on_tick,

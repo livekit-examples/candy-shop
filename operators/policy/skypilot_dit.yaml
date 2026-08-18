@@ -62,13 +62,11 @@ envs:
   BATCH_SIZE: 160
   NUM_PROCESSES: 1
 
-  # Count epochs, not steps: their LIBERO run was 100k x batch 320 over a large
-  # multi-task suite, and copying the step count is the same error as porting the folding
-  # blog's 200k pi0.5 steps. The training split is now ~129k frames (704 recorded, 50
-  # held out), so 24k x 160 = 3.8M samples is ~30 epochs. The checkpoint that works on
-  # the arm came from 14 epochs, which lands near step 11.5k here -- so this brackets it
-  # roughly 2x either side. Eval every 2500 decides where to actually stop.
-  STEPS: 24000
+  # Capped at 5000 deliberately. Both arms of the 704-episode A/B put their eval minimum
+  # at exactly 5000 and everything past it overfit -- the absolute arm reached +120% of its
+  # floor by 17.5k. This run also changes the action shape (six wide, slider.vel dropped),
+  # so it is a fresh baseline rather than a continuation.
+  STEPS: 5000
   SAVE_FREQ: 2500
   EVAL_STEPS: 2500
   EVAL_SPLIT: "0.05"
@@ -166,7 +164,7 @@ run: |
     TRAIN_REPO="${DATASET_REPO_ID}-rel"
   fi
 
-  uv run --only-group train-dit python -m operators.policy.train \
+  uv run --only-group train-dit python -m operators.policy.train_dit \
     --policy.type=multi_task_dit \
     --policy.device=cuda \
     --policy.push_to_hub=false \

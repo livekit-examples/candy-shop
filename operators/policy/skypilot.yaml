@@ -1,0 +1,69 @@
+# Fine-tune SmolVLA on the candy-shop dataset — single H100 (train.py is single-GPU).
+#
+# Relative paths resolve from where `sky` is invoked, so launch from the repo root:
+#   sky launch -c smolvla operators/policy/skypilot.yaml
+#   sky jobs launch operators/policy/skypilot.yaml
+#
+# train.py has no --resume, so a preempted managed job restarts at step 0. To pick
+# up a run by hand, point --checkpoint at a saved dir under /outputs/$RUN_NAME/checkpoints.
+name: smolvla-candy-finetune
+
+workdir: .
+
+resources:
+  accelerators: H100:1
+  disk_size: 512   # GB: base weights + HF dataset cache + in-flight checkpoints
+
+envs:
+  CHECKPOINT_BUCKET: candy-shop
+  DATASET_REPO_ID: binhpham/candy-shop
+  RUN_NAME: smolvla-candy
+  # Effective batch is BATCH_SIZE x GRAD_ACCUM. SmolVLA is 500M with a frozen
+  # vision encoder and (by default) a frozen VLM, so an H100 takes the whole
+  # effective batch in one micro-batch; GRAD_ACCUM is there for smaller cards.
+  BATCH_SIZE: 64
+  GRAD_ACCUM: 1
+  # 30k is where lerobot's SmolVLA scheduler lands: its cosine decay is configured
+  # for 30000 steps and only auto-scales *down*, so anything past this runs at the
+  # 2.5e-6 floor LR. ~24 epochs over 80k frames at effective batch 64.
+  STEPS: 30000
+  NUM_WORKERS: 8
+  # Each checkpoint is the full ~500M model plus processors, ~2 GB.
+  SAVE_FREQ: 5000
+  # Defaults train the flow-matching action expert only. Add --train-vlm to also
+  # adapt the VLM (~4x the trainable params, and it can drift on a dataset this
+  # small); --unfreeze-vision-encoder on top of that trains SigLIP as well.
+  TRAIN_FLAGS: ""
+  HF_TOKEN: ""                  # only needed while the dataset/checkpoint repos are private
+
+file_mounts:
+  /outputs:
+    source: nebius://${CHECKPOINT_BUCKET}
+    mode: MOUNT_CACHED
+
+setup: |
+  sudo apt-get update -y
+  sudo apt-get install -y python3-dev libevdev-dev ffmpeg \
+    libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev
+  pip install uv --quiet
+  uv sync --only-group train
+
+run: |
+  set -euo pipefail
+  nvidia-smi
+
+  # Keep the HF cache on instance disk; /outputs is the bucket and only takes checkpoints.
+  export HF_HOME=~/.cache/huggingface
+
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+  # --only-group leaves the project uninstalled, so run the module from the workdir.
+  uv run --only-group train python -m operators.policy.train \
+    --dataset "$DATASET_REPO_ID" \
+    --output "/outputs/$RUN_NAME" \
+    --batch-size "$BATCH_SIZE" \
+    --grad-accum "$GRAD_ACCUM" \
+    --steps "$STEPS" \
+    --num-workers "$NUM_WORKERS" \
+    --save-freq "$SAVE_FREQ" \
+    $TRAIN_FLAGS
