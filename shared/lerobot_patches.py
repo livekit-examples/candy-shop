@@ -93,6 +93,43 @@ def require_pretrained_weights() -> None:
     logger.info("[patches] pretrained weights for %s resolved", path)
 
 
+def relative_action_step(exclude_joints: tuple[str, ...], action_names=None):
+    """The relative step, taught to take its reference from the most recent pose.
+
+    DiT runs ``n_obs_steps=2``, so at training ``observation.state`` is ``[B, 2, dim]``;
+    lerobot's step was written for pi0/pi0.5, where it is ``[B, dim]``, and broadcasting a
+    two-step history across a 32-step action chunk raises. At inference the same key is
+    ``[B, dim]`` -- the policy keeps its own deque -- so both shapes have to work.
+
+    Only the offset is computed from the reduced state; the transition passed downstream
+    keeps the full history, which the model needs.
+
+    Built here rather than inline so it can be exercised directly; see
+    ``operators/policy/check_relative_actions.py``.
+    """
+    from lerobot.processor import RelativeActionsProcessorStep, TransitionKey
+    from lerobot.utils.constants import OBS_STATE
+
+    class LatestPoseRelativeActions(RelativeActionsProcessorStep):
+        def __call__(self, transition):
+            observation = transition.get(TransitionKey.OBSERVATION) or {}
+            state = observation.get(OBS_STATE)
+            if state is None or state.ndim < 3:
+                return super().__call__(transition)
+
+            reduced = dict(transition)
+            reduced[TransitionKey.OBSERVATION] = {**observation, OBS_STATE: state[:, -1]}
+            converted = super().__call__(reduced)
+
+            result = dict(transition)
+            result[TransitionKey.ACTION] = converted.get(TransitionKey.ACTION)
+            return result
+
+    return LatestPoseRelativeActions(
+        enabled=True, exclude_joints=list(exclude_joints), action_names=action_names
+    )
+
+
 def enable_relative_actions(exclude_joints: tuple[str, ...] = ()) -> None:
     """Train multi_task_dit on action deltas instead of absolute poses.
 
@@ -124,7 +161,7 @@ def enable_relative_actions(exclude_joints: tuple[str, ...] = ()) -> None:
     normalized against absolute statistics are centred nowhere near zero.
     """
     from lerobot.policies.multi_task_dit import processor_multi_task_dit as module
-    from lerobot.processor import AbsoluteActionsProcessorStep, RelativeActionsProcessorStep
+    from lerobot.processor import AbsoluteActionsProcessorStep
 
     original = module.make_multi_task_dit_pre_post_processors
     if getattr(original, "_relative", False):
@@ -133,10 +170,8 @@ def enable_relative_actions(exclude_joints: tuple[str, ...] = ()) -> None:
     def with_relative_actions(config, dataset_stats=None):
         preprocessor, postprocessor = original(config, dataset_stats)
 
-        relative = RelativeActionsProcessorStep(
-            enabled=True,
-            exclude_joints=list(exclude_joints),
-            action_names=getattr(config, "action_feature_names", None),
+        relative = relative_action_step(
+            exclude_joints, getattr(config, "action_feature_names", None)
         )
         absolute = AbsoluteActionsProcessorStep(enabled=True, relative_step=relative)
 

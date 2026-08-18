@@ -23,14 +23,11 @@ from __future__ import annotations
 
 import torch
 
-from lerobot.processor import (
-    AbsoluteActionsProcessorStep,
-    RelativeActionsProcessorStep,
-    TransitionKey,
-)
+from lerobot.processor import AbsoluteActionsProcessorStep, TransitionKey
 from lerobot.utils.constants import OBS_STATE
 
 from operators.policy.train import RELATIVE_EXCLUDE
+from shared.lerobot_patches import relative_action_step
 from shared.rest_pose import ALL_ACTION_KEYS
 
 # Far enough to be unmistakable in the output, and to make "error == drift" legible.
@@ -38,10 +35,8 @@ DRIFT = 7.5
 HORIZON = 32
 
 
-def _pair() -> tuple[RelativeActionsProcessorStep, AbsoluteActionsProcessorStep]:
-    relative = RelativeActionsProcessorStep(
-        enabled=True, exclude_joints=list(RELATIVE_EXCLUDE), action_names=list(ALL_ACTION_KEYS)
-    )
+def _pair():
+    relative = relative_action_step(RELATIVE_EXCLUDE, list(ALL_ACTION_KEYS))
     return relative, AbsoluteActionsProcessorStep(enabled=True, relative_step=relative)
 
 
@@ -63,8 +58,45 @@ def worst_error(state: torch.Tensor, actions: torch.Tensor, *, defer: bool) -> f
     return worst
 
 
+def check_state_shapes() -> None:
+    """Training feeds a 2-step history, inference a single pose. Both must work.
+
+    This is not hypothetical: the first relative run died here. lerobot's step assumes
+    pi0's ``n_obs_steps=1``, and DiT's history made it try to broadcast [B, 2, dim]
+    across a 32-step chunk.
+    """
+    dim = len(ALL_ACTION_KEYS)
+    for label, state in (
+        ("training  [B, 2, dim]", torch.randn(4, 2, dim) * 20),
+        ("inference [B, dim]   ", torch.randn(4, dim) * 20),
+    ):
+        relative, absolute = _pair()
+        reference = state[:, -1] if state.ndim == 3 else state
+        actions = torch.randn(4, HORIZON, dim) * 15 + reference.unsqueeze(1)
+
+        out = relative({TransitionKey.OBSERVATION: {OBS_STATE: state}, TransitionKey.ACTION: actions})
+        deltas = out[TransitionKey.ACTION]
+
+        # The model still needs the history it was given.
+        passed_through = out[TransitionKey.OBSERVATION][OBS_STATE]
+        assert passed_through.shape == state.shape, (
+            f"{label}: observation was reshaped to {tuple(passed_through.shape)}"
+        )
+
+        worst = max(
+            (absolute({TransitionKey.ACTION: deltas[:, k]})[TransitionKey.ACTION]
+             - actions[:, k]).abs().max().item()
+            for k in range(HORIZON)
+        )
+        print(f"{label}: round trip {worst:.6f}, observation preserved")
+        assert worst < 1e-4, f"{label} does not round-trip ({worst})"
+
+
 def main() -> None:
     torch.manual_seed(0)
+    check_state_shapes()
+    print()
+
     dim = len(ALL_ACTION_KEYS)
     state = torch.randn(1, dim) * 20
     actions = torch.randn(1, HORIZON, dim) * 15 + state.unsqueeze(1)
