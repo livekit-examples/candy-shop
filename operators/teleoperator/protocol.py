@@ -149,8 +149,6 @@ LEADER_KEYS = (
 
 MIMIC_KEYS = (
     "enabled",         # the toggle
-    "state",           # off | waiting | aligning | tracking | error
+    "state",           # off | waiting | aligning | tracking | holding | yielded | error
     "detail",          # why it is waiting, or what went wrong
-    "error_deg",       # worst joint gap between the leader and the follower
-    "intervene_deg",   # gap at which a push takes the arm; 0 = disabled
 )

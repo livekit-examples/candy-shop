@@ -88,7 +88,7 @@ asserting the claim; **Release** hands the pointer back without restarting anyth
 Runs the *voice agent* started are point-to-point RPCs this seat never sees, so they
 can be stopped but not resumed — the active operator is the only evidence they exist.
 
-## Mimic, and intervening mid-pick
+## Mimic, and taking over mid-pick
 
 `Mimic` drives the leader's six joints from the follower's observed pose (torque on,
 `Goal_Position` each tick) for as long as somebody else has the arm. The leader tracks
@@ -96,34 +96,32 @@ the pick, so the pose you would hand the robot on taking over is already the pos
 in — which is what makes a mid-policy takeover safe. Without it, claiming slews the arm
 to wherever the leader happens to be lying.
 
-**Push the leader to take the arm.** With torque on, forcing a joint opens a gap between
-where the leader is and where it was told to be; a gap past `TELEOP_MIMIC_INTERVENE_DEG`
-held for `TELEOP_MIMIC_HOLD_S` is read as a hand, and the teleoperator stops everything
-and claims. That path frees the leader outright, because the push *is* the proof a hand
-is on it.
-
-Not every gap is a hand, and the two are separated on purpose. A servo chasing a moving
-goal runs behind it, so the gap is measured against the goal from `TELEOP_MIMIC_LAG_S`
-ago — the one the leader has had time to reach — and a joint travelling *towards* its
-goal is not counted at all, however far behind it is. Without that, a policy motion
-faster than the leader can follow reads as a push and takes the arm mid-pick. If a hand
-resting on the trigger still trips it as the gripper closes, `TELEOP_MIMIC_INTERVENE_GRIPPER=0`
-takes the gripper out of push detection and leaves the five arm joints doing it.
+**Taking over is explicit: `c`, the window's Take arm, or the `claim` RPC.** Mimic reads
+no intent off the leader. It used to — a gap between where the leader was and where it had
+been told to be, held past a threshold, was read as a hand — and that gap was measured
+against a stale goal and filtered for joints already catching up, precisely because a
+servo chasing a moving goal runs behind it on its own. It still took the arm mid-pick.
+Every version of that check is a heuristic sitting between a policy and a human's actual
+intent, so there is no automatic takeover any more.
 
 **Free the leader** (`f`, or the window's button) drops torque and switches mimic off in
 one move. The toggle does that too, but not in the case that needs it: an engage that
 failed halfway leaves the arm stiff with mimic already reporting `error`, and there the
 toggle has nothing to switch off. Hold the leader before pressing it.
 
-Every other way of taking the arm **holds** the leader instead: torque stays on and the
-goal stops following the robot, which parks the arm at that pose. That is deliberate —
-an SO-101 leader nobody is holding falls under gravity, and a claimed teleoperator sends
-the follower down with it. Hold the leader, then switch mimic off to fly.
+**Taking the arm frees the leader.** Every takeover from this seat is a human stepping
+into a policy run, and a torqued leader is one you have to fight to fly. Mimic then stays
+off the leader until the arm goes back to a peer, because a claim takes seconds to travel
+(every operator has to answer its stop first) and re-engaging in that gap would torque the
+leader back up under your hand.
+
+So **claiming means a hand on the leader**: an SO-101 leader nobody is holding falls under
+gravity, and while this teleoperator has the arm the follower goes down with it.
 
 `TELEOP_MIMIC_TORQUE_LIMIT` (per mille) is how hard the leader holds itself: the default
-500 is enough to carry its own weight and still yield to a firm hand, so a push registers
-without a fight. It also caps how fast the leader can follow — raise it if tracking a
-brisk policy visibly falls behind, lower it if the arm fights your hand.
+500 carries its own weight and still yields to a hand resting on it. It also caps how fast
+the leader can follow — raise it if tracking a brisk policy visibly falls behind, lower it
+if the arm fights your hand.
 
 ## When the leader drops out
 
@@ -153,10 +151,6 @@ dataset to open immediately):
 | `TELEOP_CRUISE_VELOCITY` | `1500` | slider ticks/s while an arrow is held |
 | `TELEOP_MAX_VELOCITY` | `3000` | ceiling for the ↑-arrow speed trim |
 | `TELEOP_MIMIC_ALIGN_S` | `1.5` | worst-case ease onto the arm's pose when torque comes on |
-| `TELEOP_MIMIC_INTERVENE_DEG` | `10` | leader-vs-goal gap that counts as a push; `0` disables it |
-| `TELEOP_MIMIC_INTERVENE_GRIPPER` | `20` | the same threshold on the gripper's 0-100 travel |
-| `TELEOP_MIMIC_HOLD_S` | `0.2` | how long that gap must hold before the arm changes hands |
-| `TELEOP_MIMIC_LAG_S` | `0.25` | how stale a goal a push is judged against — the leader's own follow lag |
 | `TELEOP_MIMIC_SMOOTH_S` | `0.08` | low-pass on the leader's goal; raise if tracking looks jittery |
 | `TELEOP_MIMIC_TORQUE_LIMIT` | `500` | leader holding torque, per mille; `0` leaves the motor's own |
 | `DATASET_REPO_ID` | `binhpham/candy-shop` | corpus id (`org/name`) |
@@ -181,7 +175,7 @@ training time, so what you record trains with no extra flags.
 | [library.py](library.py) | episode index + relabel/delete corpus rewrites |
 | [dataset_repair.py](dataset_repair.py) | crash-safe parquet footer rebuild |
 | [peers.py](peers.py) | the other operators: discovery, run/stop, claim + resume |
-| [mimic.py](mimic.py) | leader-follows-follower, and the push that takes the arm |
+| [mimic.py](mimic.py) | leader-follows-follower, and the release that hands it over |
 | [session.py](session.py) | setup enumeration (ports, corpora) for the window |
 | [protocol.py](protocol.py) | the RPC contract shared by both processes |
 | [shortcuts.py](shortcuts.py) | rebindable key bindings |

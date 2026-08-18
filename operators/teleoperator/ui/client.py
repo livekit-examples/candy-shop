@@ -24,15 +24,17 @@ from operators.teleoperator import protocol
 
 logger = logging.getLogger(__name__)
 
-# One minute floor, matching the rest of the operators: these cross a relay to a peer
-# that may be busy driving the arm, and a premature abort is worse than waiting. Probing
-# a peer that is not the teleoperator still fails fast — that returns an error rather
-# than hanging, so the timeout is not what bounds it.
-RPC_TIMEOUT_S = 60.0
+# Minutes, not seconds: a command can cover work that crosses the whole room. Take arm
+# stops three operators in series (15 s each) and Stop all pays a fold on top, so a
+# minute was inside the range a claim can legitimately take — and the abort landed as a
+# red banner on a claim that then succeeded anyway. Probing a peer that is not the
+# teleoperator still fails fast — that returns an error rather than hanging, so the
+# timeout is not what bounds it.
+RPC_TIMEOUT_S = 180.0
 # The poll is not a command: `recorder_status` and friends are O(1) handlers, so a slow
 # one means the teleoperator's loop is busy, not that the work is long. Failing fast and
 # retrying on the next tick beats parking the whole poll loop — which is serial — on one
-# call for a minute and showing a minute of frozen numbers.
+# call for the whole command timeout and showing that long of frozen numbers.
 POLL_TIMEOUT_S = 10.0
 # How long a request may take to reach the peer and have its *ack* come back, before
 # `response_timeout` even starts counting. The SDK default is 7 s, which the tick loop
