@@ -17,6 +17,11 @@ resources:
 envs:
   CHECKPOINT_BUCKET: candy-shop
   DATASET_REPO_ID: binhpham/candy-shop
+
+  # The same pre-registered holdout the multi_task_dit runs carve off, so the two
+  # architectures are scored on the same unseen episodes. All of it is below index 500,
+  # so episodes recorded later are training data and these indices stay valid.
+  HOLDOUT_EPISODES: "[0,10,20,30,40,50,60,70,80,90,99,108,111,121,131,141,151,161,168,178,188,198,208,218,234,243,252,261,270,279,285,295,305,315,325,339,349,355,365,378,400,410,420,430,440,450,460,470,480,490]"
   RUN_NAME: smolvla-candy
   # Effective batch is BATCH_SIZE x GRAD_ACCUM. SmolVLA is 500M with a frozen
   # vision encoder and (by default) a frozen VLM, so an H100 takes the whole
@@ -57,9 +62,21 @@ run: |
 
   export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+  # Carve the holdout off locally rather than training on the whole repo: --dataset alone
+  # would pull all 704 episodes, holdout included.
+  mkdir -p ~/data
+  rm -rf ~/data/candy-raw ~/data/candy-train
+  uv run --only-group train hf download "$DATASET_REPO_ID" --repo-type dataset \
+    --local-dir ~/data/candy-raw
+  uv run --only-group train lerobot-edit-dataset \
+    --repo_id "$DATASET_REPO_ID" --root ~/data/candy-raw \
+    --new_repo_id "${DATASET_REPO_ID}-train" --new_root ~/data/candy-train \
+    --operation.type delete_episodes --operation.episode_indices "$HOLDOUT_EPISODES"
+
   # --only-group leaves the project uninstalled, so run the module from the workdir.
   uv run --only-group train python -m operators.policy.train \
-    --dataset "$DATASET_REPO_ID" \
+    --dataset "${DATASET_REPO_ID}-train" \
+    --dataset-root "$HOME/data/candy-train" \
     --output "/outputs/$RUN_NAME" \
     --batch-size "$BATCH_SIZE" \
     --grad-accum "$GRAD_ACCUM" \
